@@ -1,3 +1,17 @@
 # K8sApiServicePeer
 Fork of ApiServicePeer for Kubernetes conversion
+<br>
 Saas prototype for csv to json bi-conversion
+<p>
+Kubernetes commands to create a single cluster service
+<p>
+1. start minikube : minikube start
+2. create persistant volume : kubectl create -f pv-volume.yaml
+3. create pv claim : kubectl create -f pv-claim.yaml
+4. create pv-pod : kubectl create -f pv-pod.yaml
+5. create service to expose pod on port 5000 : kubectl create -f service.yaml
+6. get exposed service address : minikube service apipeer1 --url
+7. test csvToJson k8s service : 
+  - using return <ip:port> address return by #6, ping service
+  - curl <ip:port>/api/v1/ping
+    
