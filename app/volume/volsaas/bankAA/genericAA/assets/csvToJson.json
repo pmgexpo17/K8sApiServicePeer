@@ -1,0 +1,61 @@
+{
+	"csvToJson": {
+		"csvDelimiter" : ",",
+		"jsonDOM" : {
+			"rootNode" : {
+				"nodeName" : "PolicyDetails",
+				"tableName" : "PolicyDetails",
+				"ukey" : ["PolicyRiskSubitemID"],
+				"parent": null,
+				"nullPolicy" : null,
+				"children": ["DriverDetails","PremiumVariationDetails"],
+				"classTag" : "RN1"
+			},
+			"subNodes" : {
+				"DriverDetails" : {
+					"tableName" : "DriverDetails",
+					"ukey" : ["RiskDriverSubitemID"],
+					"parent" : {
+						"nodeName" : "PolicyDetails",
+						"fkey" : ["PolicyRiskSubitemID"],
+						"ukeyType" : "OneToMany"
+					},
+					"nullPolicy" : {"IncEmptyObj":false},
+					"children" : ["DriverClaimsDetails"],
+					"classTag" : "UKN1"
+				},
+				"DriverClaimsDetails" : {
+					"tableName" : "DriverClaimsDetails",
+					"ukey": null,
+					"parent" : {
+						"nodeName" : "DriverDetails",
+						"fkey" : ["RiskDriverSubitemID"],
+						"ukeyType" : null
+					},
+					"nullPolicy" : {"IncEmptyObj":false},
+					"children": null,
+					"classTag" : "FKN1"
+				},
+				"PremiumVariationDetails" : {
+					"tableName" : "PremiumVariationDetails",
+					"ukey": null,
+					"parent" : {
+						"nodeName" : "PolicyDetails",
+						"fkey" : ["PolicyRiskSubitemID"],
+						"ukeyType" : null
+					},
+					"nullPolicy" : {"IncEmptyObj":false},
+					"children": null,
+					"classTag" : "FKN1"
+				}
+			}
+		},
+		"tableTag" : {
+			"PolicyDetails" : "PD",
+			"DriverDetails" : "DD",
+			"DriverClaimsDetails": "DCD",
+			"PremiumVariationDetails" : "PVD"
+		}
+	}
+}
+  
