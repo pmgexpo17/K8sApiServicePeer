@@ -66,8 +66,6 @@ class ApiAgent(object):
   def start(self):
     
     parser = OptionParser()
-#    parser.add_option("-s", "--start-api", action="store_true", dest="starting",
-#                  default=False, help="start the http api, loading all services")
     parser.add_option("-r", "--reload-module", dest="moduleName", default=None,
                   help="reload a service module, where service name matches apiservices.json")
     (options, args) = parser.parse_args()      

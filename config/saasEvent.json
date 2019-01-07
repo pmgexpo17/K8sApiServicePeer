@@ -1,5 +1,5 @@
 metadoc={
-  "eventDomain" : [
+  "eventDomains" : [
     "bankAA/loansBB/profitA1",
     "bankAA/auditAA/finAnlysA1"
   ],
@@ -18,7 +18,7 @@ metadoc={
       "hostName" : "127.0.0.1:5000",
       "repoDomain" : "bankAA/auditAA/finAnlysA1",
       "category" : "loansBB/profitA1",
-      "fileExt":"json.gz"
+      "fileExt":"json"
     }
   }
 }
