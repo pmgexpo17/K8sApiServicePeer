@@ -19,7 +19,7 @@ Kubernetes commands to create a single cluster service
 <br>
 7. test csvToJson k8s service : 
 <br>
-  - using return <ip:port> address return by #6, ping service
+  - using returned ip_address:port service address, ping service
 <br>
-  - curl <ip:port>/api/v1/ping
+  - curl ip_address:port/api/v1/ping
     
