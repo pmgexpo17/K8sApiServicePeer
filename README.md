@@ -11,7 +11,7 @@ Kubernetes commands to create a single cluster service
 <br>
 3. create pv claim : kubectl create -f pv-claim.yaml
 <br>
-4. create pv-pod : kubectl create -f pv-pod.yaml
+4. create pv pod : kubectl create -f pv-pod.yaml
 <br>
 5. create service to expose pod on port 5000 : kubectl create -f service.yaml
 <br>
