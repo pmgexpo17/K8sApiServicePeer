@@ -47,7 +47,7 @@ class NormaliserFactory(object):
       jsData = self._leveldb.Get(dbKey)
       xformMeta = json.loads(jsData)
       logger.info('csvToJsonXform.NormaliserFactory - name, classTag : %s, %s ' 
-          % (xformMeta['nodeName'], xformMeta['classTag']))
+          % (xformMeta['tableName'], xformMeta['classTag']))
       try:
         className = 'Normalise' + xformMeta['classTag']
         klass = getattr(sys.modules[__name__], className)
