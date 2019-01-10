@@ -521,7 +521,7 @@ class CompileUKN1(Compiler):
         if self.ukeyType == 'OneToOne':
           return {}
         return []
-      elif self.ukeyType == 'OneToOne':
+      elif self.ukeyType == 'OneToMany':
         return jsObject[0]
     return jsObject
 
