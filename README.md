@@ -38,17 +38,23 @@ docker inspect apiNet1 > apiNet1Log
 # testing example, copy an csv gzipfile to the related saas repository
 <br> 
 docker cp /path/to/local/testdir/181226185843.tar.gz \
-<br>
       apiPeer1:/app/volume/volbankAE/bankAA/loansBB/profitA1/auditAA/finAnlysA1
 <br>
 # run a curl api command to start the process
 <br>
 curl -X POST http://localhost:5000/api/v1/smart \ 
-<br>
       -d 'job={"type":"director","id":null,"service":"csvxform.csvToJsonClient:CsvToJson"}' -d @temp/pmeta1.json
 <br>
-# testing example, run a command to update an apiservice module
+# testing example, how to update an apiservice module without stopping the container
 <br>
+# first, copy the updated code source to the container module directory
+<br>  
+docker cp /path/to/local/app/apiservice/csvxform/csvToJsonSaas.py apiPeer1:/app/apiservice/csvxform
+<br>
+# then, run a command to update the module. This method also works for helper modules, eg, apitools
+<br>
+# where the service name is the source of the module that imports the helper module
+<br>  
 docker exec -t apiPeer1 python apiAgent.py csvToJson -r apiservice.csvxform.csvToJsonClient
 <br>
 # run a shell command on a container, eg, browse a session workspace
