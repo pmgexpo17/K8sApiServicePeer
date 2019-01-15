@@ -49,7 +49,7 @@ curl -X POST http://localhost:5000/api/v1/smart \
 <br>
 # first, copy the updated code source to the container module directory
 <br>  
-docker cp /path/to/local/app/apiservice/csvxform/csvToJsonSaas.py apiPeer1:/app/apiservice/csvxform
+docker cp /path/to/local/app/apiservice/csvxform/csvToJsonClient.py apiPeer1:/app/apiservice/csvxform
 <br>
 # then, run a command to update the module. This method also works for helper modules, eg, apitools
 <br>
