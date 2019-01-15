@@ -17,8 +17,9 @@ docker run --name=apiPeer2 -d -v /path/to/app/log5050p2/app/log:/app/log -p 5050
 <br>
 # create a network to simulate clustered service execution
 <br>
-# peer1 is the client, peer2 is the saas
-# saas is the producer, client is the consumer
+# peer1 is the client, peer2 is the service
+<br>
+# peer2 is the producer, peer1 is the consumer
 <br>
 docker network create apiNet1
 <br>
@@ -30,7 +31,7 @@ docker inspect apiNet1 > apiNet1Log
 <br>
 # inspect apiNet1Log to find the ip address for each container
 <br>
-# now update the event config file, adding each ip address to the job json content
+# now update the event config file, adding each ip address to the json job content
 <br>
 # eg, see config/saasEvent.json
 <br>
@@ -40,7 +41,13 @@ docker cp /path/to/local/testdir/181226185843.tar.gz \
 <br>
       apiPeer1:/app/volume/volbankAE/bankAA/loansBB/profitA1/auditAA/finAnlysA1
 <br>
-# run a command to update an apiservice module
+# run a curl api command to start the process
+<br>
+curl -X POST http://localhost:5000/api/v1/smart \ 
+<br>
+      -d 'job={"type":"director","id":null,"service":"csvxform.csvToJsonClient:CsvToJson"}' -d @temp/pmeta1.json
+<br>
+# testing example, run a command to update an apiservice module
 <br>
 docker exec -t apiPeer1 python apiAgent.py csvToJson -r apiservice.csvxform.csvToJsonClient
 <br>
