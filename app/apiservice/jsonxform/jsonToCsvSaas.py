@@ -26,6 +26,7 @@ from apibase import AppDirector, AppListener, AppResolvar, MetaReader, logger
 from jsonToCsvXform import JsonMember
 from apitools.jsonxform import XformMetaPrvdr
 from apitools.mailer import XformEmailPrvdr
+from threading import RLock
 import datetime
 import leveldb
 import math
@@ -33,6 +34,12 @@ import os, sys, time
 import simplejson as json
 import requests
 import uuid
+
+# -------------------------------------------------------------- #
+# SaasError
+# ---------------------------------------------------------------#
+class SaasError(Exception):
+  pass
 
 # -------------------------------------------------------------- #
 # JsonToCsvSaas
@@ -46,23 +53,31 @@ class JsonToCsvSaas(AppDirector):
     self.state.hasNext = True
     self.resolve = Resolvar(leveldb)
     self.resolve.state = self.state
+    self.method = '__init__'
 
   # -------------------------------------------------------------- #
   # _start
   # ---------------------------------------------------------------#                                          
   def _start(self, **kwargs):
     logger.info('jsonToCsvSaas.JsonToCsvSaas._start')
-    XformEmailPrvdr.init('jsonToCsv')
-    mPrvdr = MetaPrvdr(self._leveldb, self.actorId)
-    self.jobId, self.tsXref = mPrvdr()
-    #XformEmailPrvdr.start('jsonToCsv',{})
-    self.resolve._start(mPrvdr)
-    self.mPrvdr = mPrvdr
+    self.method = '_start'
+    # if emailPrvdr.init fails, AppDirector will catch the exception
+    XformEmailPrvdr.init('jsonToCsvSaas')
+    try:
+      mPrvdr = MetaPrvdr(self._leveldb, self.actorId)
+      self.jobId, self.tsXref = mPrvdr()
+      #XformEmailPrvdr.start('jsonToCsvSaas',{})
+      self.resolve._start(mPrvdr)
+      self.mPrvdr = mPrvdr
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise SaasError(ex)
 
   # -------------------------------------------------------------- #
   # advance
   # ---------------------------------------------------------------#                                          
   def advance(self, signal=None):
+    self.method = 'advance'
     if self.state.transition == 'NORMALISE_ASYNC':
       # signal = the http status code of the companion promote method
       if signal == 201:
@@ -71,8 +86,8 @@ class JsonToCsvSaas(AppDirector):
         self.state.inTransition = False
       else:
         errmsg = 'NORMALISE_ASYNC failed, returned error signal : %d' % signal
-        logger.error(errmsg)
-        raise Exception(errmsg)
+        self.newMail('ERR1','system error',errmsg)
+        raise SaasError(errmsg)
     elif self.state.transition == 'FINAL_HANDSHAKE':
       # signal = the http status code of the companion promote method
       if signal == 201:
@@ -81,8 +96,8 @@ class JsonToCsvSaas(AppDirector):
         self.state.inTransition = False
       else:
         errmsg = 'FINAL_HANDSHAKE failed, returned error signal : %d' % signal
-        logger.error(errmsg)
-        raise Exception(errmsg)
+        self.newMail('ERR1','system error',errmsg)
+        raise SaasError(errmsg)
     if self.state.hasNext:
       self.state.current = self.state.next
     return self.state
@@ -91,12 +106,13 @@ class JsonToCsvSaas(AppDirector):
   # quicken
   # ---------------------------------------------------------------#
   def quicken(self):
-    if self.state.transition in ['NORMALISE_ASYNC','FINAL_HANDSHAKE']:
-      try:
+    self.method = 'quicken'
+    try:    
+      if self.state.transition in ['NORMALISE_ASYNC','FINAL_HANDSHAKE']:
         self.putApiRequest(201)
-      except Exception as ex:
-        logger.error('### putApiRequest failed : ' + str(ex))
-        raise
+    except Exception as ex:
+      self.newMail('ERR1','api request failed',str(ex))
+      raise SaasError(ex)
 
   # -------------------------------------------------------------- #
   # putApiRequest
@@ -126,25 +142,34 @@ class JsonToCsvSaas(AppDirector):
   # onError
   # ---------------------------------------------------------------#
   def onError(self, ex):
-    # if WcResolvar has caught an exception an error mail is ready to be sent
-    if not XformEmailPrvdr.hasMailReady('JsonToCsv'):
-      method = 'jsonToCsvSaas.Resolvar._start.' + self.state.current
-      errdesc = 'system error'
-      logger.error(ex)
-      self.sendMail('ERR1',method,errdesc,str(ex))
+    logger.info('jsonToCsvSaas.JsonToCsvSaas.onError')
+    # test if the error is already handled
+    if isinstance(ex,(SaasError,ResolveError,ListenerError,MetaPrvdrError)):
+      self.sendMail()
     else:
-      self.sendMail('JsonToCsv')
+      # in this case the source method is not visible, so send the state info
+      stateDesc = 'JsonToCsvSaas.state.current : ' + self.state.current
+      self.sendMail('ERR1',stateDesc,'system error',str(ex))
     try:
+      # notify jsonToCsvClient about saas failure
       self.putApiRequest(500)
     except Exception as ex:
-      logger.error('### putApiRequest failed : ' + str(ex))
-
+      self.newMail('ERR1','api request failed',str(ex))
+      self.sendMail()
 
   # -------------------------------------------------------------- #
   # sendMail
   # ---------------------------------------------------------------#
-  def sendMail(self,*args):      
-    XformEmailPrvdr.sendMail('JsonToCsv',*args)
+  def sendMail(self, *args):
+    XformEmailPrvdr.sendMail('jsonToCsvSaas',*args)
+
+  # -------------------------------------------------------------- #
+  # newMail
+  # ---------------------------------------------------------------#
+  def newMail(self, bodyKey, *args):
+    method = '%s.%s:%s' \
+      % (self.__class__.__module__, self.__class__.__name__, self.method)
+    XformEmailPrvdr.newMail('jsonToCsvSaas',bodyKey,method,*args)
 
 # -------------------------------------------------------------- #
 # getLineCount
@@ -154,6 +179,12 @@ def getLineCount(fname):
     for i, l in enumerate(f):
       pass
   return i
+
+# -------------------------------------------------------------- #
+# ResolveError
+# ---------------------------------------------------------------#
+class ResolveError(Exception):
+  pass
 
 # -------------------------------------------------------------- #
 # Resolvar
@@ -172,57 +203,86 @@ class Resolvar(AppResolvar):
   # _start
   # ---------------------------------------------------------------#
   def _start(self, mPrvdr):
-    self.state.current = 'EVAL_XFORM_META'
-    self.jobId, self.tsXref = mPrvdr.getJobVars()
-    self.mPrvdr = mPrvdr
-    msg = 'jsonToCsvSaas.Resolvar, starting job %s ...'
-    logger.info(msg % self.jobId)
+    self.method = '_start'
+    try:
+      self.state.current = 'EVAL_XFORM_META'
+      self.jobId, self.tsXref = mPrvdr.getJobVars()
+      self.mPrvdr = mPrvdr
+      msg = 'jsonToCsvSaas.Resolvar, starting job %s ...'
+      logger.info(msg % self.jobId)
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ResolveError(ex)
 
 	# -------------------------------------------------------------- #
 	# EVAL_CVS_META
 	# ---------------------------------------------------------------#
   def EVAL_XFORM_META(self):
-    self.evalXformMeta()
-    self.state.next = 'NORMALISE_JSON'
-    self.state.hasNext = True
-    return self.state
+    try:
+      self.evalXformMeta()
+      self.state.next = 'NORMALISE_JSON'
+      self.state.hasNext = True
+      return self.state
+    except ResolveError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
   # NORMALISE_JSON
   # - state.next = 'WRITE_JS_FILE'
   # ---------------------------------------------------------------#
   def NORMALISE_JSON(self):
-    self.evalSysStatus()
-    self.putXformMeta()
-    self.state.transition = 'NORMALISE_ASYNC'
-    self.state.inTransition = True
-    self.state.next = 'MAKE_ZIP_FILE'
-    self.state.hasNext = True
-    return self.state
+    try:
+      self.evalSysStatus()
+      self.putXformMeta()
+      self.state.transition = 'NORMALISE_ASYNC'
+      self.state.inTransition = True
+      self.state.next = 'MAKE_ZIP_FILE'
+      self.state.hasNext = True
+      return self.state
+    except ResolveError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
   # MAKE_ZIP_FILE
   # - state.next = 'REMOVE_WORKSPACE'
   # ---------------------------------------------------------------#
   def MAKE_ZIP_FILE(self):
-    JsonMember.reset()
-    self.writeCsvFiles()
-    self.makeGZipFile()
-    self.state.transition = 'FINAL_HANDSHAKE'
-    self.state.inTransition = True
-    self.state.next = 'REMOVE_WORKSPACE'
-    self.state.hasNext = True
-    return self.state
+    try:
+      JsonMember.reset()
+      self.writeCsvFiles()
+      self.makeGZipFile()
+      self.state.transition = 'FINAL_HANDSHAKE'
+      self.state.inTransition = True
+      self.state.next = 'REMOVE_WORKSPACE'
+      self.state.hasNext = True
+      return self.state
+    except ResolveError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
   # REMOVE_WORKSPACE
   # ---------------------------------------------------------------#
   def REMOVE_WORKSPACE(self):
-    self.removeWorkSpace()
-    self.purgeXformData()
-    self.state.hasNext = False
-    self.state.complete = True
-    return self.state
+    try:
+      self.removeWorkSpace()
+      self.purgeXformData()
+      self.state.hasNext = False
+      self.state.complete = True
+      return self.state
+    except ResolveError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
   # evalXformMeta -
@@ -232,11 +292,11 @@ class Resolvar(AppResolvar):
     kwArgs = {'itemKey':'jsonToCsv'}
     repoMeta = self.mPrvdr.getSaasMeta('SaasXformMngr','xformDomain',kwArgs=kwArgs)
     metaFile = repoMeta['repoName'] + '/' + repoMeta['xformMeta']
-    logger.info('jsonToCsv, xform meta file : ' + metaFile)
+    logger.info('xform meta file : ' + metaFile)
     if not os.path.exists(metaFile):
       errmsg = 'xform meta file does not exist : %s' % metaFile
       self.newMail('ERR1','system error',errmsg)
-      raise Exception(errmsg)
+      raise ResolveError(errmsg)
 
     xformMeta = XformMetaPrvdr()
     try:
@@ -257,53 +317,52 @@ class Resolvar(AppResolvar):
     self.method = 'evalSysStatus'
     repoMeta = self.mPrvdr.getSaasMeta('SaasRepoMngr','repoDomain')
     if not os.path.exists(repoMeta['sysPath']):
-      errmsg = 'jsonToCsv, xform input path does not exist : ' + repoMeta['sysPath']
+      errmsg = 'xform input path does not exist : ' + repoMeta['sysPath']
       self.newMail('ERR1','system error',errmsg)
-      raise Exception(errmsg)
+      raise ResolveError(errmsg)
 
     catPath = self.mPrvdr['category']
     if catPath not in repoMeta['consumer categories']:
-      errmsg = 'Consumer category %s does not exist in source repo : %s ' \
+      errmsg = 'consumer category %s does not exist in : %s ' \
                                           % (catPath, repoMeta['sysPath'])
       self.newMail('ERR1','system error',errmsg)
-      raise Exception
+      raise ResolveError(errmsg)
   
     repoPath = '%s/%s' % (repoMeta['sysPath'], catPath)
-    logger.info('jsonToCsv, input json file repo path : ' + repoPath)
+    logger.info('input json file repo path : ' + repoPath)
 
     inputJsonFile = '%s.%s' % (self.jobId, self.mPrvdr['fileExt'])
-    logger.info('jsonToCsv, input json file : ' + inputJsonFile)
+    logger.info('input json file : ' + inputJsonFile)
 
     jsonFilePath = '%s/%s' % (repoPath, inputJsonFile)
     if not os.path.exists(jsonFilePath):
-      errmsg = 'jsonToCsv, xform input zip file does not exist in source repo'
+      errmsg = 'xform input zip file does not exist in source repo'
       self.newMail('ERR1','system error',errmsg)
-      raise Exception(errmsg)
+      raise ResolveError(errmsg)
 
     if not os.path.exists(self.mPrvdr['workSpace']):
       errmsg = 'xform workspace path does not exist : ' + self.mPrvdr['workSpace']
       self.newMail('ERR1','system error',errmsg)
-      raise Exception(errmsg)
+      raise ResolveError(errmsg)
 
     workSpace = self.mPrvdr['workSpace'] + '/' + self.tsXref
-    logger.info('jsonToCsv, session workspace : ' + workSpace)
-    logger.info('jsonToCsv, creating session workspace ... ')
+    logger.info('session workspace : ' + workSpace)
+    logger.info('creating session workspace ... ')
 
     cmdArgs = ['mkdir','-p',workSpace]
     try:
       self.sysCmd(cmdArgs)
     except Exception as ex:
-      errmsg = 'failed to create workspace : ' + workSpace
-      self.newMail('ERR1','system error',errmsg)
-      raise Exception
+      self.newMail('ERR1','create workspace failed',str(ex))
+      raise ResolveError(errmsg)
 
     cmdArgs = ['cp',jsonFilePath,workSpace]
     try:
       self.sysCmd(cmdArgs)
     except Exception as ex:
-      errmsg = 'failed to copy input json file to workspace'
-      self.newMail('ERR1','system error',errmsg)
-      raise Exception
+      errmsg = '%s copy to workspace failed' % inputJsonFile
+      self.newMail('ERR1',errmsg,str(ex))
+      raise ResolveError(errmsg)
     
     self.jsonFileName = self.jobId
 
@@ -317,10 +376,9 @@ class Resolvar(AppResolvar):
     try:
       self.sysCmd(cmdArgs,cwd=workSpace)
     except Exception as ex:
-      errmsg = 'json file split linux command failed : %s\n cmd dir : %s' \
-                                                    % (str(cmdArgs), workSpace)
-      self.newMail('ERR1','system error',errmsg)
-      raise Exception
+      errmsg = 'command failed : ' + str(cmdArgs)
+      self.newMail('ERR1',errmsg,str(ex))
+      raise ResolveError(errmsg)
 
     dbKey = '%s|REPO|workspace' % self.tsXref
     self._leveldb.Put(dbKey, workSpace)
@@ -347,7 +405,7 @@ class Resolvar(AppResolvar):
     except Exception as ex:
       errmsg = 'failed to store %s meta item' % nodeName
       self.newMail('ERR1',errmsg,str(ex))
-      raise
+      raise ResolveError(errmsg)
 
   # -------------------------------------------------------------- #
   # writeCsvFiles
@@ -360,9 +418,9 @@ class Resolvar(AppResolvar):
         with open(csvPath,'w') as csvFh:
           self.writeCsvFile(csvFh, csvName)
     except Exception as ex:
-      errmsg = 'write csv file %s failed : %s' % (csvName, str(ex))
-      self.newMail('ERR1','system error',errmsg)
-      raise Exception
+      errmsg = '%s write failed' % csvName
+      self.newMail('ERR1',errmsg,str(ex))
+      raise ResolveError(errmsg)
 
   # -------------------------------------------------------------- #
   # writeCsvFile
@@ -389,8 +447,9 @@ class Resolvar(AppResolvar):
       record = ','.join(json.loads(header))
       csvFh.write(record + '\n')
     except KeyError:
-      errmsg = 'JsonMember.factory session var is not reset properly'
-      raise Exception(errmsg)
+      errmsg = 'header key not found in db : ' + dbKey
+      self.newMail('ERR1','system error',errmsg)
+      raise ResolveError(errmsg)
 
   # -------------------------------------------------------------- #
   # getIterByRangeKey
@@ -418,39 +477,37 @@ class Resolvar(AppResolvar):
       cmd = 'tar -czf %s *.csv' % gzipFile
       self.sysCmd(cmd,cwd=self.workSpace,shell=True)
     except Exception as ex:
-      errmsg = 'csv tar gzipfile creation failed : ' + str(ex)
-      self.newMail('ERR1','system error',errmsg)
-      raise Exception
+      errmsg = '%s gzip failed : ' % gzipFile
+      self.newMail('ERR1',errmsg,str(ex))
+      raise ResolveError(errmsg)
 
   # -------------------------------------------------------------- #
   # removeWorkSpace
   # ---------------------------------------------------------------#
   def removeWorkSpace(self):
     self.method = 'removeWorkSpace'
-    logger.info('csvToJson, removing workspace ...')
+    logger.info('csvToJson, removing %s workspace ...' % self.tsXref)
     try:
       cmdArgs = ['rm','-rf',self.workSpace]
       self.sysCmd(cmdArgs)
-    except Exception as ex:
-      errmsg = 'failed to remove workspace : ' + self.workSpace
-      self.newMail('ERR1',errmsg,str(ex))
-      raise Exception
-    else:
       msg = 'jsonToCsvSaas.Resolvar, job %s is now complete'
       logger.info(msg % self.jobId)
+    except Exception as ex:
+      self.newMail('ERR1','remove workspace failed',str(ex))
+      raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
   # purgeXformData
   # ---------------------------------------------------------------#
   def purgeXformData(self):
     self.method = 'purgeXformData'
-    logger.info('jsonToCsv, purging xform data ...')
+    logger.info('purging xform data ...')
     try:
       self._purgeXformData()
     except Exception as ex:
       errmsg = 'purge xform data failed'
       self.newMail('ERR1',errmsg,str(ex))
-      raise Exception(errmsg)
+      raise ResolveError(errmsg)
 
   # -------------------------------------------------------------- #
   # _purgeXformData
@@ -474,7 +531,13 @@ class Resolvar(AppResolvar):
   def newMail(self, bodyKey, *args):
     method = '%s.%s:%s' \
       % (self.__class__.__module__, self.__class__.__name__, self.method)
-    XformEmailPrvdr.newMail('jsonToCsv',bodyKey,method,*args)
+    XformEmailPrvdr.newMail('jsonToCsvSaas',bodyKey,method,*args)
+
+# -------------------------------------------------------------- #
+# ListenerError
+# ---------------------------------------------------------------#
+class ListenerError(Exception):
+  pass
 
 # -------------------------------------------------------------- #
 # NormaliseLstnr
@@ -486,32 +549,68 @@ class NormaliseLstnr(AppListener):
     self.callerHost = callerHost    
     self.state = None
     self.actors = []
+    self.method = '__init__'
+    self.lock = RLock()
+    self.hasError = False
 
+  # -------------------------------------------------------------- #
+  # __call__
+  # ---------------------------------------------------------------#
   def __call__(self, event):
-    if not event.exception and self.state.transition == 'NORMALISE_ASYNC':
-      if event.job_id in self.actors:
-        with self.state.lock:
-          self.actors.remove(event.job_id)
-          if not self.actors:
-            logger.info('jsonToCsvSaas.NormaliseLstnr : send resume signal to the caller')
-            self.putApiRequest(201)
-    elif event.exception:
-      self.putApiRequest(500)
+    with self.lock:
+      if event.job_id not in self.actors or self.hasError:
+        return
+      if event.exception:
+        self.hasError = True
+        self.putApiRequest(500)
+      elif self.state.transition == 'NORMALISE_ASYNC':
+        self.evalEvent(event.job_id)
+
+  # -------------------------------------------------------------- #
+  # evalEvent
+  # ---------------------------------------------------------------#
+  def evalEvent(self, jobId):
+    self.method = 'evalEvent'
+    try:
+      self.actors.remove(jobId)
+      if not self.actors:
+        logger.info('jsonToCsvSaas.NormaliseLstnr : sending resume signal to caller')
+        self.putApiRequest(201)
+    except ListenerError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ListenerError(ex)
 
   # -------------------------------------------------------------- #
   # register - add a list of live job ids
   # ---------------------------------------------------------------#
   def register(self, jobRange=None):
     logger.info('jsonToCsvSaas.NormaliseLstnr register : ' + str(jobRange))
-    self.actors = actors = []
-    for _ in jobRange:
-      actors += [str(uuid.uuid4())]
-    return actors
+    try:
+      self.actors = actors = []
+      for _ in jobRange:
+        actors += [str(uuid.uuid4())]
+      return actors
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ListenerError(ex)
 
   # -------------------------------------------------------------- #
   # putApiRequest
   # ---------------------------------------------------------------#
   def putApiRequest(self, signal):
+    self.method = 'putApiRequest'
+    try:
+      self._putApiRequest(signal)
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ListenerError(ex)
+
+  # -------------------------------------------------------------- #
+  # _putApiRequest
+  # ---------------------------------------------------------------#
+  def _putApiRequest(self, signal):
     classRef = 'jsonxform.jsonToCsvSaas:jsonToCsvSaas'
     pdata = (self.caller,classRef,json.dumps({'signal':signal}))
     params = '{"type":"director","id":"%s","service":"%s","kwargs":%s}' % pdata
@@ -519,6 +618,20 @@ class NormaliseLstnr(AppListener):
     apiUrl = 'http://%s/api/v1/smart' % self.callerHost
     response = requests.post(apiUrl,data=data)
     logger.info('api response ' + response.text)
+
+  # -------------------------------------------------------------- #
+  # newMail
+  # ---------------------------------------------------------------#
+  def newMail(self, bodyKey, *args):
+    method = '%s.%s:%s' \
+      % (self.__class__.__module__, self.__class__.__name__, self.method)
+    XformEmailPrvdr.newMail('jsonToCsvSaas',bodyKey,method,*args)
+
+# -------------------------------------------------------------- #
+# MetaPrvdrError
+# ---------------------------------------------------------------#
+class MetaPrvdrError(Exception):
+  pass
 
 # -------------------------------------------------------------- #
 # MetaPrvdr
@@ -534,6 +647,7 @@ class MetaPrvdr(MetaReader):
   # __getitem__
   # ---------------------------------------------------------------#
   def __getitem__(self, key):
+    self.method = '__getitem__'
     try:
       if key == 'jobId':
         return self.jobId
@@ -543,7 +657,7 @@ class MetaPrvdr(MetaReader):
       return self.jobMeta[key]
     except Exception as ex:
       self.newMail('ERR1','system error',str(ex))
-      raise    
+      raise MetaPrvdrError(ex)
 
   # -------------------------------------------------------------- #
   # __setitem__
@@ -556,25 +670,31 @@ class MetaPrvdr(MetaReader):
   # ---------------------------------------------------------------#
   def __call__(self):
     self.method = '__call__'
-    pMetadoc = self.getProgramMeta()
-    self.jobMeta = pMeta = json.loads(pMetadoc)
-    logger.info('### PMETA : ' + str(pMeta))
-    kwArgs = {'itemKey':pMeta['jobId']}
-    _jobMeta = self.getSaasMeta('SaasEventMngr','eventDomain',queryArgs=['JOB'],kwArgs=kwArgs)
-    logger.info('### JOB_META : ' + str(_jobMeta))    
-    className = _jobMeta['service']
-    self.jobMeta = _jobMeta[className]
-    self.jobId = pMeta['jobId']
-    logger.info('### SAAS JOB_META : ' + str(self.jobMeta))    
-    className = _jobMeta['client'] 
-    self.jobMeta['client'] = _jobMeta[className]
-    logger.info('### CLIENT JOB_META : ' + str(self.jobMeta['client']))        
-    self.tsXref = datetime.datetime.now().strftime('%y%m%d%H%M%S')
-    #tsXref = '181223155620'
-    #dbKey = 'TSXREF|' + self.actorId
-    #self._leveldb.Put(dbKey, tsXref)
-    logger.info('### jobId, tsXref : %s, %s' % (self.jobId, self.tsXref))
-    return (self.jobId, self.tsXref)
+    try:
+      pMetadoc = self.getProgramMeta()
+      self.jobMeta = pMeta = json.loads(pMetadoc)
+      logger.info('### PMETA : ' + str(pMeta))
+      kwArgs = {'itemKey':pMeta['jobId']}
+      _jobMeta = self.getSaasMeta('SaasEventMngr','eventDomain',queryArgs=['JOB'],kwArgs=kwArgs)
+      logger.info('### JOB_META : ' + str(_jobMeta))    
+      className = _jobMeta['service']
+      self.jobMeta = _jobMeta[className]
+      self.jobId = pMeta['jobId']
+      logger.info('### SAAS JOB_META : ' + str(self.jobMeta))    
+      className = _jobMeta['client'] 
+      self.jobMeta['client'] = _jobMeta[className]
+      logger.info('### CLIENT JOB_META : ' + str(self.jobMeta['client']))        
+      self.tsXref = datetime.datetime.now().strftime('%y%m%d%H%M%S')
+      #tsXref = '181223155620'
+      #dbKey = 'TSXREF|' + self.actorId
+      #self._leveldb.Put(dbKey, tsXref)
+      logger.info('### jobId, tsXref : %s, %s' % (self.jobId, self.tsXref))
+      return (self.jobId, self.tsXref)
+    except MetaPrvdrError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise MetaPrvdrError(ex)
 
   # -------------------------------------------------------------- #
   # getJobVars
@@ -597,24 +717,23 @@ class MetaPrvdr(MetaReader):
         hostName = self.jobMeta['hostName']
       apiUrl = 'http://%s/api/v1/saas/%s' % (hostName, self.jobMeta[domainKey])
       response = requests.get(apiUrl,data=data)
+      return json.loads(response.text)      
     except Exception as ex:
       self.newMail('ERR1','system error',str(ex))
-      raise
-    return json.loads(response.text)
+      raise MetaPrvdrError(ex)
 
   # -------------------------------------------------------------- #
   # getProgramMeta
   # ---------------------------------------------------------------#
   def getProgramMeta(self):
     self.method = 'getProgramMeta'
-  
-    dbKey = 'PMETA|' + self.actorId
     try:
+      dbKey = 'PMETA|' + self.actorId
       return self._leveldb.Get(dbKey)
     except KeyError:
       errmsg = 'EEOWW! pmeta db resource not found : ' + dbKey
       self.newMail('ERR1','system error',errmsg)
-      raise Exception(errmsg)
+      raise MetaPrvdrError(errmsg)
 
   # -------------------------------------------------------------- #
   # newMail
@@ -622,5 +741,5 @@ class MetaPrvdr(MetaReader):
   def newMail(self, bodyKey, *args):
     method = '%s.%s:%s' \
       % (self.__class__.__module__, self.__class__.__name__, self.method)
-    XformEmailPrvdr.newMail('jsonToCsv',bodyKey,method,*args)
+    XformEmailPrvdr.newMail('jsonToCsvSaas',bodyKey,method,*args)
 

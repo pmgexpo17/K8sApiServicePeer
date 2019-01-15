@@ -20,14 +20,18 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 #
-from apibase import AppResolvar, logger
+from apibase import AppResolvar
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.utils import COMMASPACE, formatdate
 from email.mime.text import MIMEText
 from threading import RLock
+import logging
 import smtplib
 import sys, yaml
+
+logger1 = logging.getLogger('apiservice.smart')
+logger2 = logging.getLogger('apiservice.async')
 
 # -------------------------------------------------------------- #
 # EmailPacket
@@ -35,7 +39,11 @@ import sys, yaml
 class EmailPacket(object):
   
   def __init__(self):
-    self.reset()
+    self.attachment = None
+    self.mailBody = ''
+    self.scope = ''    
+    self.subject = ''
+    self.multiPart = []
 
   # ------------------------------------------------------------ #
   # - setAttachment
@@ -57,15 +65,6 @@ class EmailPacket(object):
         fileName = bindFile.split('/')[-1]
       self.setAttachment(bindFile,fileName)
     
-  # ------------------------------------------------------------ #
-  # - reset
-  # -------------------------------------------------------------#
-  def reset(self):
-    self.attachment = None
-    self.mailBody = ''
-    self.scope = ''    
-    self.subject = ''
-
 # -------------------------------------------------------------- #
 # XformEmailPrvdr
 # ---------------------------------------------------------------#
@@ -77,8 +76,6 @@ class XformEmailPrvdr(AppResolvar):
     self.mailbox = {}
     self.__dict__['ERR1'] = self.setBodyERR1
     self.__dict__['ERR2'] = self.setBodyERR2
-    self.__dict__['ERR3'] = self.setBodyERR3
-    self.__dict__['EOP1'] = self.setBodyEOP1
     # add default params for _start error message handling
     self.jobTitle = 'XformEmailPrvdr._start'
     self._to = ['pmg7670@gmail.com']
@@ -122,6 +119,7 @@ class XformEmailPrvdr(AppResolvar):
   # - _newMail
   # -------------------------------------------------------------#
   def _newMail(self, mailKey, bodyKey, *args):
+    self.packet = self.mailbox[mailKey]
     self.mailbox[mailKey] = self.wrapMail(bodyKey, *args)
 
   # ------------------------------------------------------------ #
@@ -133,17 +131,31 @@ class XformEmailPrvdr(AppResolvar):
   # ------------------------------------------------------------ #
   # - setBodyERR1
   # -------------------------------------------------------------#
-  def setBodyERR1(self, msgScope, desc, message):
-
-    logger.error('%s:%s,%s' % (msgScope,desc,message))
-    return EmailPacket()
+  def setBodyERR1(self, msgScope, desc, message):    
+    mailPart = '%s:%s,%s' % (msgScope,desc,message)
+    logger1.error(mailPart)
+#    self.packet.multiPart.append(mailPart)
+#    mailBody = '\n'.join(self.packet.multiPart)
+#    self.packet.wrap(mailBody)
+    return self.packet
 
   # ------------------------------------------------------------ #
   # - setBodyERR2
   # -------------------------------------------------------------#
-  def setBodyERR2(self, msgScope, scriptName, logFile, progLib):
+  def setBodyERR2(self, msgScope, desc, message):
+    mailPart = '%s:%s,%s' % (msgScope,desc,message)
+    logger2.error(mailPart)
+#    self.packet.multiPart.append(mailPart)
+#    mailBody = '\n'.join(self.packet.multiPart)
+#    self.packet.wrap(mailBody)
+    return self.packet
 
-    logger.error('%s.sas has errored. refer %s' % (scriptName, logFile))
+  # ------------------------------------------------------------ #
+  # - setBodyERR3
+  # -------------------------------------------------------------#
+  def setBodyERR3(self, msgScope, scriptName, logFile, progLib):
+
+    logger1.error('%s.sas has errored. refer %s' % (scriptName, logFile))
     packet = EmailPacket()
     packet.subject = self.meta['ERR2'][0] \
                     % (self._params['Label'],self._params['JobRef'])
@@ -154,12 +166,12 @@ class XformEmailPrvdr(AppResolvar):
     return packet
 
   # ------------------------------------------------------------ #
-  # - setBodyERR3
+  # - setBodyERR4
   # -------------------------------------------------------------#
-  def setBodyERR3(self, msgScope, scriptName):
+  def setBodyERR4(self, msgScope, scriptName):
 
     logFile = '%s/log/%s.log' % (self.progLib, scriptName)    
-    logger.error('%s.sas has errored. refer %s' % (scriptName, logFile))
+    logger1.error('%s.sas has errored. refer %s' % (scriptName, logFile))
     packet = EmailPacket()
     # the email template is exactly the same as ERR2
     packet.subject = self.meta['ERR2'][0] \
@@ -188,9 +200,9 @@ class XformEmailPrvdr(AppResolvar):
     msg = MIMEMultipart()
     msg['Subject'] = packet.subject
     msg['From'] = self._from
-    logger.info('### mail from : ' + str(msg['From']))
+    logger1.debug('### mail from : ' + str(msg['From']))
     msg['To'] = COMMASPACE.join(self._to)
-    logger.info('### mail to : ' + str(msg['To']))
+    logger1.debug('### mail to : ' + str(msg['To']))
     msg['Date'] = formatdate(localtime=True)
     
     msg.attach(packet.mailBody)
@@ -202,7 +214,7 @@ class XformEmailPrvdr(AppResolvar):
     #server.login('pmg7670@gmail.com',self.passwd.decode('hex'))
     #server.sendmail(self._from, self._to, msg.as_string())
     #server.close()
-    self.mailbox[mailKey] = None
+    self.mailbox[mailKey] = EmailPacket()
 
   # -------------------------------------------------------------- #
   # hasMailReady
@@ -242,20 +254,19 @@ class XformEmailPrvdr(AppResolvar):
     with XformEmailPrvdr._lock:
       mailer = XformEmailPrvdr.mailer
       if not mailer:
-        XformEmailPrvdr.mailer = XformEmailPrvdr()
-        mailer.mailbox[mailKey] = None
+        mailer = XformEmailPrvdr()
+        mailer.mailbox[mailKey] = EmailPacket()
+        XformEmailPrvdr.mailer = mailer
       elif mailKey not in mailer.mailbox:
-        mailer.mailbox[mailKey] = None
+        mailer.mailbox[mailKey] = EmailPacket()
 
   # -------------------------------------------------------------- #
   # init
   # ---------------------------------------------------------------#  
   @staticmethod
   def init(mailKey):
-    with XformEmailPrvdr._lock:
-      if not XformEmailPrvdr.mailer:
-        XformEmailPrvdr.mailer = XformEmailPrvdr()
-      XformEmailPrvdr.subscribe(mailKey)
+    # TODO : import mail template yaml file before subscribe
+    XformEmailPrvdr.subscribe(mailKey)
 
   # -------------------------------------------------------------- #
   # start

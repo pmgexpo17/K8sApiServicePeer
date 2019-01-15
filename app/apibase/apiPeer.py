@@ -326,22 +326,46 @@ class ApiPeer(object):
   def _make(apiBase):
 
     global logger
-    logger = logging.getLogger('apscheduler')
+    logger1 = logging.getLogger('apscheduler')
     logFormat = '%(levelname)s:%(asctime)s %(message)s'
     logFormatter = logging.Formatter(logFormat, datefmt='%d-%m-%Y %I:%M:%S %p')
-    logfile = '%s/log/apiPeer.log' % apiBase
+    logPath = '%s/log' % apiBase
+    if not os.path.exists(logPath):
+      subprocess.call(['mkdir','-p',logPath])
+    logfile = '%s/apiPeer.log' % logPath
     fileHandler = logging.FileHandler(logfile)
     fileHandler.setFormatter(logFormatter)
-    logger.addHandler(fileHandler)
+    logger1.setLevel(logging.INFO)
+    logger1.addHandler(fileHandler)
 
-#    handler = logging.StreamHandler(sys.stdout)
-#    handler.setFormatter(logFormatter)
-#    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    logger2 = logging.getLogger('apiservice.smart')
+    logFormat = '%(levelname)s:%(asctime)s %(message)s'
+    logFormatter = logging.Formatter(logFormat, datefmt='%d-%m-%Y %I:%M:%S %p')
+    logfile = '%s/apiSmart.log' % logPath
+    fileHandler = logging.FileHandler(logfile)
+    fileHandler.setFormatter(logFormatter)
+    logger2.addHandler(fileHandler)
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logFormatter)
+    logger2.setLevel(logging.INFO)
+    logger2.addHandler(handler)
+    logger = logger2
+
+    logger3 = logging.getLogger('apiservice.async')
+    logFormat = '%(levelname)s:%(asctime)s %(message)s'
+    logFormatter = logging.Formatter(logFormat, datefmt='%d-%m-%Y %I:%M:%S %p')
+    logfile = '%s/apiAsync.log' % logPath
+    fileHandler = logging.FileHandler(logfile)
+    fileHandler.setFormatter(logFormatter)
+    logger3.setLevel(logging.INFO)
+    logger3.addHandler(fileHandler)
 
     dbPath = '%s/database/jobstore' % apiBase
+    if not os.path.exists(dbPath):
+      subprocess.call(['mkdir','-p',dbPath])
     ApiPeer.apiBase = apiBase
-    ApiPeer.appPrvdr = AppProvider.connect(dbPath)    
+    ApiPeer.appPrvdr = AppProvider.connect(dbPath)
     
   @staticmethod
   def _start(port, app_config=None):

@@ -144,14 +144,34 @@ class XformMetaPrvdr(object):
     metaNode['tableName']
     metaNode['nullPolicy']
     metaNode['classTag']
+    hasUkey = False
     for metaKey in ['ukey','parent','children']:
       metaItem = metaNode[metaKey]
+      if metaKey == 'ukey':
+        hasUkey = metaItem is not None
       if metaKey == 'parent':
         metaItem['nodeName']
-        metaItem['ukeyType']
+        self.validateUkeyPolicy(hasUkey, metaItem)
         metaItem = metaItem['fkey']
         errtxt = 'FKey item'
       if metaItem and not isinstance(metaItem, list):
         errmsg = 'metafile list value expected for %s %s in %s' % (metaKey, errtxt, nodeName)
         raise Exception(errmsg)
 
+	#------------------------------------------------------------------#
+	# validateUkeyPolicy
+	#------------------------------------------------------------------#
+  def validateUkeyPolicy(self, hasUkey, metaItem):
+    ukeyPolicy = metaItem['ukeyPolicy']
+    if ukeyPolicy['type'] not in ('OneToOne','OneToMany'):
+      errmsg = 'ukeyPolicy type must exist in %s' + str(['OneToOne','OneToMany'])
+      raise Exception(errmsg)
+    if ukeyPolicy['subType'] not in ('LIST','HASH'):
+      errmsg = 'ukeyPolicy subType must exist in %s' + str(['LIST, HASH'])
+      raise Exception(errmsg)
+    if ukeyPolicy['type'] == 'OneToOne' and ukeyPolicy['subType'] != 'HASH':
+      errmsg = 'subType = HASH is requrired for ukeyPolicy OneToOne'
+      raise Exception(errmsg)
+    if not hasUkey and (ukeyPolicy['type'] != 'OneToMany' and ukeyPolicy['subType'] != 'LIST'):
+      errmsg = 'if subNode does not have a ukey, ukeyPolicy type must == OneToMany'
+      raise Exception(errmsg)

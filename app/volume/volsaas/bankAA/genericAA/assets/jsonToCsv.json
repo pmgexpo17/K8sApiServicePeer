@@ -18,7 +18,10 @@
 					"parent" : {
 						"nodeName" : "PolicyDetails",
 						"fkey" : ["PolicyRiskSubitemID"],
-						"ukeyType" : "OneToMany"
+						"ukeyPolicy" : {
+							"type" : "OneToMany",
+							"subType" : "LIST"
+						}
 					},
 					"nullPolicy" : {"IncEmptyObj":false},
 					"children" : ["DriverClaimsDetails"],
@@ -30,7 +33,10 @@
 					"parent" : {
 						"nodeName" : "DriverDetails",
 						"fkey" : ["RiskDriverSubitemID"],
-						"ukeyType" : null
+						"ukeyPolicy" : {
+							"type" : "OneToMany",
+							"subType" : "LIST"
+						}
 					},
 					"nullPolicy" : {"IncEmptyObj":false},
 					"children": null,
@@ -42,7 +48,10 @@
 					"parent" : {
 						"nodeName" : "PolicyDetails",
 						"fkey" : ["PolicyRiskSubitemID"],
-						"ukeyType" : null
+						"ukeyPolicy" : {
+							"type" : "OneToMany",
+							"subType" : "LIST"
+						}
 					},
 					"nullPolicy" : {"IncEmptyObj":false},
 					"children": null,

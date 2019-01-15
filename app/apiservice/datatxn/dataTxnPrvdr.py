@@ -26,7 +26,7 @@ import logging
 import leveldb
 import os
 
-logger = logging.getLogger('apscheduler')
+logger = logging.getLogger('apiservice.smart')
 
 # -------------------------------------------------------------- #
 # PurgeDataSet

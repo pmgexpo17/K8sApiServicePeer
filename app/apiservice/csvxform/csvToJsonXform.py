@@ -21,60 +21,77 @@
 # THE SOFTWARE.
 #
 from abc import ABCMeta, abstractmethod
-from apibase import logger
 from apitools.mailer import XformEmailPrvdr
 from collections import deque, OrderedDict
 import csv
+import logging
 import os, sys, time
 import simplejson as json
+
+logger = logging.getLogger('apiservice.async')
 
 # -------------------------------------------------------------- #
 # NormaliserFactory
 # ---------------------------------------------------------------#
 class NormaliserFactory(object):
 
-  def __init__(self, leveldb, caller):
+  def __init__(self, leveldb, jobId, caller):
     self._leveldb = leveldb
+    self.jobId = jobId    
     self.caller = caller
+    self.method = '__init__'
 
   # -------------------------------------------------------------- #
   # __call__
   # ---------------------------------------------------------------#
   def __call__(self, tsXref, taskNum):
-    self.method = 'csvToJsonXform.NormaliserFactory.__call__'
+    self.method = '__call__'
     try:
       dbKey = '%s|XFORM|META|%d' % (tsXref, taskNum)
       jsData = self._leveldb.Get(dbKey)
       xformMeta = json.loads(jsData)
       logger.info('csvToJsonXform.NormaliserFactory - name, classTag : %s, %s ' 
-          % (xformMeta['tableName'], xformMeta['classTag']))
+          % (xformMeta['nodeName'], xformMeta['classTag']))
       try:
         className = 'Normalise' + xformMeta['classTag']
         klass = getattr(sys.modules[__name__], className)
       except AttributeError:
-        errmsg = 'xformMeta class %s does not exist in %s' % (className, __name__)
-        self.sendMail('system error',errmsg)
-        raise
+        errmsg = '%s class does not exist in %s' % (className, __name__)
+        raise Exception(errmsg)
       dbKey = '%s|REPO|workspace' % tsXref
       workSpace = self._leveldb.Get(dbKey)
-      csvFileName = '%s/%s.csv' % (workSpace, xformMeta['tableName'])
-      if not os.path.exists(csvFileName):
-        errmsg = 'csvFile %s does not exist in workspace %s' \
-                          % (xformMeta['tableName'], workSpace)
-        self.sendMail('system error',errmsg)
+      csvFileName = '%s.csv' % xformMeta['tableName']
+      logger.info('### normalise workspace : ' + workSpace)
+      logger.info('### csv filename : ' + csvFileName)
+      csvFilePath = '%s/%s' % (workSpace, csvFileName)
+      if not os.path.exists(csvFilePath):
+        errmsg = '%s does not exist in workspace' % csvFileName
         raise Exception(errmsg)
       normalObj = klass(self._leveldb)
       normalObj.applyMeta(tsXref, xformMeta)
-      normalObj.normalise(csvFileName)
+      normalObj.normalise(csvFilePath)
+    # apscheduler will only catch BaseException, EVENT_JOB_ERROR will not fire otherwise      
+    except NormaliseError:
+      errmsg = 'csvfile :' + csvFileName
+      self.newMail('ERR2','normalise failed',errmsg)
+      raise BaseException(ex)
     except Exception as ex:
-      self.sendMail('system error',str(ex))
-      raise
+      self.newMail('ERR2','system error',str(ex))
+      raise BaseException(ex)
 
   # -------------------------------------------------------------- #
-  # sendMail
+  # newMail
   # ---------------------------------------------------------------#
-  def sendMail(self, *args):
-    XformEmailPrvdr.sendMail('CsvToJson','ERR1',self.method,*args)
+  def newMail(self, bodyKey, *args):
+    method = '%s.%s:%s' \
+      % (self.__class__.__module__, self.__class__.__name__, self.method)
+    XformEmailPrvdr.newMail('csvToJsonSaas',bodyKey,method,*args)
+
+# -------------------------------------------------------------- #
+# NormaliseError
+# ---------------------------------------------------------------#
+class NormaliseError(Exception):
+  pass
 
 #------------------------------------------------------------------#
 # Normaliser
@@ -85,6 +102,7 @@ class Normaliser(object):
   def __init__(self, leveldb):
     self._leveldb = leveldb
     self.isRoot = False
+    self.method = '__init__'
 
   # -------------------------------------------------------------- #
   # _putObjects
@@ -97,6 +115,7 @@ class Normaliser(object):
 	# normalise
 	#------------------------------------------------------------------#
   def normalise(self, csvFilePath):
+    self.method = 'normalise'
     try:
       with open(csvFilePath) as csvfh:
         csvReader = csv.reader(csvfh,quotechar='"', 
@@ -112,22 +131,34 @@ class Normaliser(object):
           dbKey = '%s|%s|rowcount' % (self.tsXref, self.name)
           self._leveldb.Put(dbKey, str(self.recnum))
         logger.info('#### %s rowcount : %d' % (self.name, self.recnum))
-    except csv.Error as exc:
-      errmsg = 'csv reader error, file: %s, line: %d, %s' \
-                              % (self.name, csvReader.line_num, str(exc))
-      print('@normalize, %s' % errmsg)
-      raise Exception(errmsg)
+    except NormaliseError:
+      raise
+    except csv.Error as ex:
+      errmsg = 'csv reader error, file: %s, line: %d' \
+                                      % (self.name, csvReader.line_num)
+      self.newMail('ERR2',errmsg,str(ex))
+      raise NormaliseError(ex)
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise NormaliseError(ex)
 
 	#------------------------------------------------------------------#
 	# putObjects
 	#------------------------------------------------------------------#
   def putObjects(self, keys, values):
+    self.method = 'putObjects'
     try:
       self._putObjects(keys, values)
-    except KeyError as ex:
-      print('KEYS : ' + str(keys))
-      print('@putCsvRecord, ' + str(ex))
+    except NormaliseError:
       raise
+    except KeyError as ex:
+      errdesc = 'all keys : ' + str(keys)
+      errmsg = 'key error : ' + str(ex)
+      self.newMail('ERR2',errdesc, errmsg)
+      raise NormaliseError(errmsg)
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise NormaliseError(ex)
 
 	#------------------------------------------------------------------#
 	# getUkValue
@@ -147,23 +178,35 @@ class Normaliser(object):
 	# applyMeta
 	#------------------------------------------------------------------#
   def applyMeta(self, tsXref, xformMeta):
-    self.tsXref = tsXref 
-    self.name = xformMeta['nodeName']
-    self.ukey = xformMeta['ukey']
-    self.hasParent = xformMeta['parent'] is not None
-    self.fkey = xformMeta['parent']['fkey'] if self.hasParent else None
+    self.method = 'applyMeta'
+    try:
+      self.tsXref = tsXref 
+      self.name = xformMeta['nodeName']
+      self.ukey = xformMeta['ukey']
+      self.hasParent = xformMeta['parent'] is not None
+      self.fkey = xformMeta['parent']['fkey'] if self.hasParent else None
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise NormaliseError(ex)
 
 	#------------------------------------------------------------------#
 	# append
 	#------------------------------------------------------------------#
   def append(self, dbKey, value):
-    record = self.getRecord(dbKey)
-    dbKey = '%s|%s' % (self.tsXref, dbKey)
-    if not record:
-      self._leveldb.Put(dbKey, json.dumps([value]))
-    else:
-      record.append(value)
-      self._leveldb.Put(dbKey, json.dumps(record))
+    self.method = 'append'
+    try:
+      record = self.getRecord(dbKey)
+      dbKey = '%s|%s' % (self.tsXref, dbKey)
+      if not record:
+        self._leveldb.Put(dbKey, json.dumps([value]))
+      else:
+        record.append(value)
+        self._leveldb.Put(dbKey, json.dumps(record))
+    except NormaliseError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise NormaliseError(ex)
 
 	#------------------------------------------------------------------#
 	# getRecord
@@ -177,16 +220,32 @@ class Normaliser(object):
       return record
     except KeyError:
       return None
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise NormaliseError(ex)
 
 	#------------------------------------------------------------------#
 	# putRecord
 	#------------------------------------------------------------------#
   def putRecord(self, dbKey, value):
-    dbKey = '%s|%s' % (self.tsXref, dbKey)
-    if isinstance(value,basestring):
-      self._leveldb.Put(dbKey, value)
-    else:  
-      self._leveldb.Put(dbKey, json.dumps(value))
+    self.method = 'putRecord'
+    try:
+      dbKey = '%s|%s' % (self.tsXref, dbKey)
+      if isinstance(value,basestring):
+        self._leveldb.Put(dbKey, value)
+      else:  
+        self._leveldb.Put(dbKey, json.dumps(value))
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise NormaliseError(ex)
+
+  # -------------------------------------------------------------- #
+  # newMail
+  # ---------------------------------------------------------------#
+  def newMail(self, bodyKey, *args):
+    method = '%s.%s:%s' \
+      % (self.__class__.__module__, self.__class__.__name__, self.method)
+    XformEmailPrvdr.newMail('csvToJsonSaas',bodyKey,method,*args)
 
 #------------------------------------------------------------------#
 # NormaliseRN1
@@ -256,6 +315,12 @@ class NormaliseFKN1(Normaliser):
     self.append(dbKey, recordL)
 
 # -------------------------------------------------------------- #
+# CompileError
+# ---------------------------------------------------------------#
+class CompileError(Exception):
+  pass
+
+# -------------------------------------------------------------- #
 # CompilerFactory
 # ---------------------------------------------------------------#
 class CompilerFactory(object):
@@ -263,41 +328,49 @@ class CompilerFactory(object):
   def __init__(self, leveldb, tsXref):
     self._leveldb = leveldb
     self.tsXref = tsXref
+    self.method = '__init__'
 
   # -------------------------------------------------------------- #
   # get
   # ---------------------------------------------------------------#
   def get(self, nodeName, parent):
     self.method = 'get'
-    #logger.info('### hardhash dbPath : ' + tsXref)
-    #db = HardHash.connect(tsXref)
-    dbKey = '%s|XFORM|META|%s' % (self.tsXref, nodeName)
-    #xformMeta = db[dbKey]
-    metaData = self._leveldb.Get(dbKey)
-    xformMeta = json.loads(metaData)
-    logger.info('csvToJsonXform.CompilerFactory - name, classTag : %s, %s ' 
-        % (xformMeta['nodeName'], xformMeta['classTag']))
     try:
-      className = 'Compile' + xformMeta['classTag']
-      klass = getattr(sys.modules[__name__], className)
-    except AttributeError:
-      errmsg = 'xformMeta class %s does not exist in %s' % (className, __name__)
-      self.newMail('system error',errmsg)
-      raise
-    obj = klass(self._leveldb, parent)
-    obj.applyMeta(self.tsXref, xformMeta)
-    return obj
+      dbKey = '%s|XFORM|META|%s' % (self.tsXref, nodeName)
+      metaData = self._leveldb.Get(dbKey)
+      xformMeta = json.loads(metaData)
+      logger.info('csvToJsonXform.CompilerFactory - name, classTag : %s, %s ' 
+          % (xformMeta['tableName'], xformMeta['classTag']))
+      try:
+        className = 'Compile' + xformMeta['classTag']
+        klass = getattr(sys.modules[__name__], className)
+      except AttributeError:
+        errmsg = 'xformMeta class %s does not exist in %s' % (className, __name__)
+        self.newMail('ERR2','system error',errmsg)
+        raise CompileError(errmsg)
+      obj = klass(self._leveldb, parent)
+      obj.applyMeta(self.tsXref, xformMeta)
+      return obj
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
   # -------------------------------------------------------------- #
   # getMembers
   # ---------------------------------------------------------------#
   def getMembers(self, parent):
     self.method = 'getMembers'
-    memberList = []
-    for nodeName in parent.children:
-      logger.info('%s member : %s ' % (parent.name, nodeName))
-      memberList.append(self.get(nodeName, parent))
-    return memberList
+    try:
+      memberList = []
+      for nodeName in parent.children:
+        logger.info('%s member : %s ' % (parent.name, nodeName))
+        memberList.append(self.get(nodeName, parent))
+      return memberList
+    except CompileError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
   # -------------------------------------------------------------- #
   # newMail
@@ -305,7 +378,7 @@ class CompilerFactory(object):
   def newMail(self, bodyKey, *args):
     method = '%s.%s:%s' \
       % (self.__class__.__module__, self.__class__.__name__, self.method)
-    XformEmailPrvdr.newMail('csvToJson',bodyKey,method,*args)
+    XformEmailPrvdr.newMail('csvToJsonSaas',bodyKey,method,*args)
 
 #------------------------------------------------------------------#
 # Compiler
@@ -321,6 +394,7 @@ class Compiler(object):
     self.ukeys = []
     self.fkeyMap = {}
     self.jsObject = {}
+    self.method = '__init__'
 
 	#------------------------------------------------------------------#
 	# start
@@ -344,74 +418,95 @@ class Compiler(object):
     pass
 
   # -------------------------------------------------------------- #
-  # evalJsObject
+  # getJsObject
   # -------------------------------------------------------------- #
   @abstractmethod
-  def evalJsObject(self, *args, **kwargs):
+  def getJsObject(self, *args, **kwargs):
     pass
 
 	#------------------------------------------------------------------#
 	# applyMeta
 	#------------------------------------------------------------------#
   def applyMeta(self, tsXref, xformMeta):
-    self.tsXref = tsXref
-    self.name = xformMeta['nodeName']
-    self.ukeyName = '|'.join(xformMeta['ukey']) if xformMeta['ukey'] else None
-    self.fkeyName = '|'.join(xformMeta['parent']['fkey']) if not self.isRoot else None
-    self.ukeyType = xformMeta['parent']['ukeyType'] if not self.isRoot else None
-    self.nullPolicy = xformMeta['nullPolicy']
-    self.isLeafNode = xformMeta['children'] is None
-    self.children = xformMeta['children']
+    self.method = 'applyMeta'
+    try:      
+      self.tsXref = tsXref
+      self.name = xformMeta['nodeName']
+      self.ukeyName = '|'.join(xformMeta['ukey']) if xformMeta['ukey'] else None
+      self.fkeyName = '|'.join(xformMeta['parent']['fkey']) if not self.isRoot else None
+      self.nullPolicy = xformMeta['nullPolicy']
+      self.isLeafNode = xformMeta['children'] is None
+      self.children = xformMeta['children']
+      self.ukeyType = None
+      self.subType = None
+      if self.isRoot:
+        return
+      ukeyPolicy = xformMeta['parent']['ukeyPolicy']    
+      self.ukeyType = ukeyPolicy['type']
+      self.subType = ukeyPolicy['subType']
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# getMembers
 	#------------------------------------------------------------------#
   def getMembers(self):
-    if self.isLeafNode:
-      return None
-    memberList = self.factory.getMembers(self)
-    if self.isRoot:  
+    self.method = 'getMembers'
+    try:
+      if self.isLeafNode:
+        return None
+      memberList = self.factory.getMembers(self)
+      if self.isRoot:  
+        return memberList
+      memberList.reverse()
       return memberList
-    memberList.reverse()
-    return memberList
+    except CompileError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# build
 	#------------------------------------------------------------------#
   def build(self):
-    for ukey in self.parent.ukeys:
-      jsObject = self.parent.jsObject[ukey]
-      if jsObject: # test if parent obj != {}
-        jsObject[self.name] = self.getJsObject(ukey)
-        self.parent.jsObject[ukey] = jsObject
+    self.method = 'build'
+    try:
+      for ukey in self.parent.ukeys:
+        jsObject = self.parent.jsObject[ukey]
+        if jsObject: # test if parent obj != {}
+          jsObject[self.name] = self.getJsObject(ukey)
+          self.parent.jsObject[ukey] = jsObject
+    except CompileError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# getEmptyObj
+  # only relevent if subType == HASH
 	#------------------------------------------------------------------#
   def getEmptyObj(self):
-    if self.nullPolicy['IncEmptyObj']:
-      dbKey = '%s|columns' % self.name
-      columns = self.getRecord(dbKey)
-      return OrderedDict([(colname, "") for colname in columns])
-    return None
-
-	#------------------------------------------------------------------#
-	# getJsObject
-	#------------------------------------------------------------------#
-  def getJsObject(self, fkey):
-    if fkey is None:
-      if self.ukeyName:
-        return {}
-      return []
-    return self.evalJsObject(fkey)
+    self.method = 'getEmptyObject'
+    try:
+      if self.nullPolicy['IncEmptyObj']:
+        dbKey = '%s|columns' % self.name
+        columns = self.getRecord(dbKey)
+        return OrderedDict([(colname, "") for colname in columns])
+      return {}
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# getRecord
 	#------------------------------------------------------------------#
-  def getRecord(self, dbKey, restore=True, verbose=False):
+  def getRecord(self, dbKey, restore=True):
+    self.method = 'getRecord'
     dbKey = '%s|%s' % (self.tsXref, dbKey)
-    if verbose:
-      logger.info('### dbKey : ' + dbKey)
+    logger.debug('### dbKey : ' + dbKey)
     try:
       record = self._leveldb.Get(dbKey)
       if restore:
@@ -419,12 +514,23 @@ class Compiler(object):
       return record
     except KeyError:
       return None
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# putJsObject
 	#------------------------------------------------------------------#
   def putJsObject(self):
     pass
+
+  # -------------------------------------------------------------- #
+  # newMail
+  # ---------------------------------------------------------------#
+  def newMail(self, bodyKey, *args):
+    method = '%s.%s:%s' \
+      % (self.__class__.__module__, self.__class__.__name__, self.method)
+    XformEmailPrvdr.newMail('csvToJsonSaas',bodyKey,method,*args)
 
 #------------------------------------------------------------------#
 # CompileRN1
@@ -441,43 +547,54 @@ class CompileRN1(Compiler):
   # compile
   # -------------------------------------------------------------- #
   def compile(self, dbKey, rootUkey):
-    self.rownum = dbKey.split('|')[-1]
-    self.ukeys = []
-    self.fkeyMap = {}
-    self.jsObject = {}
-    self.fkeyMap[rootUkey] = [rootUkey]
-    self.ukeys = [rootUkey]
-    record = self.getRecord(rootUkey)
-    self.jsObject[rootUkey] = OrderedDict(record)
+    self.method = 'compile'
+    try:
+      self.rownum = dbKey.split('|')[-1]
+      self.ukeys = []
+      self.fkeyMap = {}
+      self.jsObject = {}
+      self.fkeyMap[rootUkey] = [rootUkey]
+      self.ukeys = [rootUkey]
+      record = self.getRecord(rootUkey)
+      self.jsObject[rootUkey] = OrderedDict(record)
+    except CompileError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# getJsObject
 	#------------------------------------------------------------------#
   def getJsObject(self, fkey):
-    return self.jsObject[fkey]
-
-	#------------------------------------------------------------------#
-	# evalJsObject
-	#------------------------------------------------------------------#
-  def evalJsObject(self, fkey):
-    pass
+    self.method = 'getJsObject'
+    try:
+      return self.jsObject[fkey]
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# putJsObject
 	#------------------------------------------------------------------#
   def putJsObject(self, rootUkey):
+    self.method = 'putJsObject'    
     # special case : json object build is complete, now put it to db
-    jsObject = {}
-    jsObject[self.name] = self.jsObject[rootUkey]
-    dbKey = '%s|%s' % (self.tsXref, self.rownum)
-    self._leveldb.Put(dbKey, json.dumps(jsObject))
+    try:
+      jsObject = {}
+      jsObject[self.name] = self.jsObject[rootUkey]
+      dbKey = '%s|%s' % (self.tsXref, self.rownum)
+      self._leveldb.Put(dbKey, json.dumps(jsObject))
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 #------------------------------------------------------------------#
 # CompileUKN1
 #------------------------------------------------------------------#
 class CompileUKN1(Compiler):
   '''
-  CompileJson, model - Unique Key Node 1
+  CompileJson, model - Unique Key Node1
   ''' 
   def __init__(self, xformMeta, parent):
     super(CompileUKN1, self).__init__(xformMeta, parent)
@@ -486,51 +603,60 @@ class CompileUKN1(Compiler):
 	# compile
 	#------------------------------------------------------------------#
   def compile(self):
-    self.ukeys = []
-    self.fkeyMap = {}
-    self.jsObject = {}
-    for fkey in self.parent.ukeys:
-      if fkey is None:
-        return
-      dbKey = '%s|%s' % (self.name,fkey)
-      fkRecord = self.getRecord(dbKey)
-      if not fkRecord:
-        # 0 child objects exist 
-        self.fkeyMap[fkey] = [None]
-        self.ukeys = [None]
-        self.jsObject[None] = self.getEmptyObj()
-        continue
-      self.fkeyMap[fkey] = []
-      for jsData in fkRecord:
-        ukey = jsData
-        self.fkeyMap[fkey] += [ukey]
-        self.ukeys += [ukey]        
-        self.jsObject[ukey] = OrderedDict(self.getRecord(ukey))
+    self.method = 'compile'
+    try:
+      self.ukeys = []
+      self.fkeyMap = {}
+      self.jsObject = {}
+      for fkey in self.parent.ukeys:
+        if fkey is None:
+          return
+        dbKey = '%s|%s' % (self.name,fkey)
+        fkRecord = self.getRecord(dbKey)
+        if not fkRecord:
+          # 0 child objects exist 
+          self.fkeyMap[fkey] = None
+          self.jsObject[fkey] = [] if self.subType == 'LIST' else self.getEmptyObj()
+          continue
+        self.fkeyMap[fkey] = []
+        for ukey in fkRecord:
+          self.fkeyMap[fkey] += [ukey]
+          self.ukeys += [ukey]        
+          self.jsObject[ukey] = OrderedDict(self.getRecord(ukey))
+    except CompileError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
-	# evalJsObject
+	# getJsObject
 	#------------------------------------------------------------------#
-  def evalJsObject(self, fkey):
-    jsObject = []
-    ukeys = self.fkeyMap[fkey]
-    for ukey in ukeys:
-      jsObject += [self.jsObject[ukey]]
-    if len(jsObject) == 1:
-      # don't include null objects, ie, when IncEmptyObj is false
-      if jsObject == [None]:
-        if self.ukeyType == 'OneToOne':
-          return {}
-        return []
-      elif self.ukeyType == 'OneToMany':
-        return jsObject[0]
-    return jsObject
+  def getJsObject(self, fkey):
+    self.method = 'getJsObject'
+    try:
+      ukeys = self.fkeyMap[fkey]
+      if not ukeys:
+        return self.jsObject[fkey]
+      jsObject = [] if self.subType == 'LIST' else {}
+      for ukey in ukeys:
+        if self.subType == 'LIST':
+          jsObject += [self.jsObject[ukey]]
+        else:
+          jsObject[ukey] = self.jsObject[ukey]
+      return jsObject
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 #------------------------------------------------------------------#
 # CompileJsonFKN1
 #------------------------------------------------------------------#
 class CompileFKN1(Compiler):
   '''
-  CompileJson, model - Foreign Key Node 1
+  CompileJson, model - Foreign Key Node1
+  Foreign Key model is defined by hasUkey == False
+  In this case, the ukeyPolicy type, subType are always OneToMany, LIST respectively
   ''' 
   def __init__(self, xformMeta, parent):
     super(CompileFKN1, self).__init__(xformMeta, parent)
@@ -539,35 +665,43 @@ class CompileFKN1(Compiler):
 	# compile
 	#------------------------------------------------------------------#
   def compile(self):
-    self.ukeys = []
-    self.fkeyMap = {}
-    self.jsObject = {}
-    for fkey in self.parent.ukeys:
-      if fkey is None:
-        return
-      dbKey = '%s|%s' % (self.name,fkey)
-      fkRecord = self.getRecord(dbKey)
-      if not fkRecord:
-        # 0 child objects exist 
-        self.fkeyMap[fkey] = fkey
-        self.jsObject[fkey] = [self.getEmptyObj()]
-        continue
-      self.fkeyMap[fkey] = []
-      for jsData in fkRecord:
-        jsObject = OrderedDict(jsData)
-        # there is no fkey to ukey mapping when ukey is not defined
-        self.fkeyMap[fkey] = fkey
-        if fkey in self.jsObject:
-          self.jsObject[fkey] += [jsObject]
-        else:
-          self.jsObject[fkey] = [jsObject]
+    self.method = 'compile'
+    try:
+      self.ukeys = []
+      self.fkeyMap = {}
+      self.jsObject = {}
+      for fkey in self.parent.ukeys:
+        if fkey is None:
+          return
+        dbKey = '%s|%s' % (self.name,fkey)
+        fkRecord = self.getRecord(dbKey)
+        if not fkRecord:
+          # 0 child objects exist 
+          self.fkeyMap[fkey] = None
+          self.jsObject[fkey] = []
+          continue
+        self.fkeyMap[fkey] = []
+        for jsData in fkRecord:
+          jsObject = OrderedDict(jsData)
+          # there is no fkey to ukey mapping when ukey is not defined
+          self.fkeyMap[fkey] = fkey
+          if fkey in self.jsObject:
+            self.jsObject[fkey] += [jsObject]
+          else:
+            self.jsObject[fkey] = [jsObject]
+    except CompileError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
-	# evalJsObject
+	# getJsObject
 	#------------------------------------------------------------------#
-  def evalJsObject(self, fkey):
-    fkey = self.fkeyMap[fkey]
-    jsObject = self.jsObject[fkey]
-    if jsObject == [None]: # ensure an empty list when IncEmptyObj is false
-      return []
-    return jsObject
+  def getJsObject(self, fkey):
+    self.method = 'getJsObject'
+    try:
+      return self.jsObject[fkey]
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise CompileError(ex)

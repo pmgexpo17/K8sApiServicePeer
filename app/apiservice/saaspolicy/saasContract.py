@@ -25,7 +25,7 @@ import json
 import logging
 import os
 
-logger = logging.getLogger('apscheduler')
+logger = logging.getLogger('apiservice.smart')
 
 # -------------------------------------------------------------- #
 # SaasEventMngr

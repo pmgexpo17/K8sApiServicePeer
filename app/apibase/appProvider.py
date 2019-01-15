@@ -59,7 +59,7 @@ class AppProvider(object):
   @staticmethod
   def start(dbPath):
     global logger
-    logger = logging.getLogger('apscheduler')
+    logger = logging.getLogger('apiservice.smart')
     
     logger.info('### AppProvider is starting ... ###')
     if not os.path.isdir(dbPath):
@@ -93,7 +93,10 @@ class AppProvider(object):
     for jobNum in jobRange:
       actorId = jobs.pop(0)
       # leveldb, actorId constructor params are fixed by protocol
-      self._job[actorId] = getattr(module, className)(self.db, params.id)
+      delegate = getattr(module, className)(self.db, actorId, params.id)
+      # ensure delegate._type attribute is set
+      delegate._type = 'delegate'
+      self._job[actorId] = delegate
       params.args[-1] = jobNum
       self.runActor(params,actorId)
       # append the job to remake the original list
@@ -200,10 +203,10 @@ class AppProvider(object):
       else:
         if not actor.state.complete:
           return
-        logMsg = 'director[%s] is complete, removing it now ...'
+        logMsg = '### %s director %s is complete, removing it now ...'
         if actor.state.failed:
-          logMsg = 'director[%s] has failed, removing it now ...'
-        logger.info(logMsg, actorId)
+          logMsg = '### %s director %s has failed, removing it now ...'
+        logger.info(logMsg, actor.__class__.__name__,actorId)
         if actor._type == 'director':
           self.removeMeta(actorId)
         if hasattr(actor, 'listener'):
@@ -211,10 +214,25 @@ class AppProvider(object):
         del(self._job[actorId])
 
   # -------------------------------------------------------------- #
+  # handleError
+  # ---------------------------------------------------------------#
+  def handleError(self, delegate, ex):
+    with self.lock:
+      try:
+        caller = self._job[delegate.caller]
+        caller.listener
+      except (AttributeError, KeyError):
+        pass
+      else:
+        args = (delegate.__class__.__name__,delegate.jobId,caller.__class__.__name__,delegate.caller)
+        logMsg = 'delegate %s, %s failed, notifying caller %s, %s' % args
+        logger.info(logMsg)
+        #caller.onError(ex)
+
+  # -------------------------------------------------------------- #
   # removeMeta
   # ---------------------------------------------------------------#
   def removeMeta(self, actorId):
-
     dbKey = 'PMETA|' + actorId
     self.db.Delete(dbKey)
 

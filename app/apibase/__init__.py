@@ -36,7 +36,11 @@ def dispatch(jobId, *argv, **kwargs):
   except KeyError:
     logger.error('jobId not found in job register : ' + jobId)
     return
-  
-  delegate(*argv, **kwargs)
-  appPrvdr.evalComplete(delegate, jobId)
+  try:
+    delegate(*argv, **kwargs)
+  except Exception as ex:
+    if delegate._type == 'delegate':
+      appPrvdr.handleError(delegate, ex)
+  else:
+    appPrvdr.evalComplete(delegate, jobId)
 

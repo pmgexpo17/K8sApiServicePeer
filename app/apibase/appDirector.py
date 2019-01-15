@@ -28,7 +28,7 @@ import logging
 import os
 import re
 
-logger = logging.getLogger('apscheduler')
+logger = logging.getLogger('apiservice.smart')
 
 # -------------------------------------------------------------- #
 # SysCmdUnit
@@ -102,21 +102,20 @@ class AppDirector(SysCmdUnit):
           self._start(*args, **kwargs)
           self.state.status = 'STARTED'
         except Exception as ex:
-          self.state.complete = True
-          self.state.failed = True
           logger.error('_start failed : ' + str(ex))
+          self.state.failed = True
+          self.state.complete = True
           self.onError(ex)
-          return
       if self.state.status == 'STARTED':
         try:
           self.runApp(*args, **kwargs)
         except Exception as ex:
-          self.state.complete = True
-          self.state.failed = True
           try:
+            self.state.failed = True
+            self.state.complete = True
             self.onError(ex)
           except Exception as ex:
-            logger.error('!!! FATAL ERROR : onError should not throw exceptions !!!')
+            logger.error('### FATAL ERROR : ' + str(ex))
 
   # -------------------------------------------------------------- #
   # runApp
@@ -126,17 +125,17 @@ class AppDirector(SysCmdUnit):
     try:      
       state = self.state
       if state.inTransition and signal is not None:
-        logger.info('received signal : %d' % signal)
+        logger.info('%s received signal : %d' % (self.__class__.__name__, signal))
         state = self.advance(signal)
         if state.inTransition:
           # multiple signals required for successful state transition 
           return 
         logger.info('state transition resolved by signal : ' + str(signal))
       while state.hasNext: # complete?
-        logger.info('resolving state : ' + state.current)
+        logger.info('%s resolving state : %s' % (self.__class__.__name__,state.current))
         state = self.resolve[state.current]()
         if state.inTransition:
-          logger.info('in transition to next state %s , so quicken ...' % state.next)
+          logger.info('quicken state transition %s ... ' % state.transition)
           self.quicken()
           break  
         state = self.advance()
