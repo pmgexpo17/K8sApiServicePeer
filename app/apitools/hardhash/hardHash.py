@@ -244,18 +244,19 @@ class LeveldbClient(Messenger):
         raise
 
   #----------------------------------------------------------------#
-  # maxKey
+  # minmax
+  # get the resolved bounds of a range
   #----------------------------------------------------------------#		
-  def maxKey(self, keyLow, keyHigh):
+  def minmax(self, keyLow, keyHigh):
     with self.lock:
       try:
         keyLow = self._prefix + keyLow if self._prefix else keyLow
         keyHigh = self._prefix + keyHigh if self._prefix else keyHigh      
-        logger.info('### MAXKEY keyLow, keyHigh : %s, %s' % (keyLow, keyHigh))
-        self.putPacket(['MAXKEY',keyLow,keyHigh])
-        return self.getPacket('MAXKEY')
+        logger.info('### MINMAX keyLow, keyHigh : %s, %s' % (keyLow, keyHigh))
+        self.putPacket(['MINMAX',keyLow,keyHigh])
+        return self.getPacket('MINMAX')
       except Exception as ex:
-        logger.error('MAXKEY failed : ' + str(ex))
+        logger.error('MINMAX failed : ' + str(ex))
         raise
 
   #----------------------------------------------------------------#
