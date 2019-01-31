@@ -1,10 +1,7 @@
 from collections import MutableMapping
 from threading import Thread, RLock, Event
-import leveldb
 import logging
 import simplejson as json
-import signal
-import subprocess
 import os, sys, time
 import zmq
 
