@@ -128,8 +128,14 @@ class AppDirector(SysCmdUnit):
         logger.info('%s received signal : %d' % (self.__class__.__name__, signal))
         state = self.advance(signal)
         if state.inTransition:
-          # multiple signals required for successful state transition 
-          return 
+          if state.hasNext:
+            logger.info('quicken state transition %s ... ' % state.transition)
+            self.quicken()
+          else:
+            # in this case multiple signals are required to resolve the state transition
+            # until all signals are received state.hasNext will remain False
+            pass
+          return
         logger.info('state transition resolved by signal : ' + str(signal))
       while state.hasNext: # complete?
         logger.info('%s resolving state : %s' % (self.__class__.__name__,state.current))

@@ -30,6 +30,7 @@ from threading import RLock
 from flask import Flask, request, g
 from flask_restful import reqparse, abort, Resource, Api
 from apibase import AppProvider
+from apiservice.saaspolicy import ContractError
 
 def setPrvdr():
   if 'prvdr' not in g:
@@ -40,7 +41,6 @@ parser.add_argument('job')
 parser.add_argument('pmeta')
 parser.add_argument('service')
 parser.add_argument('module')
-parser.add_argument('dbpath')
 parser.add_argument('metadoc')
 
 # promotes a smart, ie, stateful long running job
@@ -178,84 +178,6 @@ class Ping(Resource):
     return {'status':200,'pid':os.getpid()}, 200
 
 # ping to test if server is up
-class DbAdmin(Resource):
-  _lock = RLock()
-
-  # GET: get the requested dbPath exist status 
-  # - append the provided path segment to the dbPath root
-  # - then return the exist status
-  def get(self):
-    args = parser.parse_args()
-    logger.info('args : ' + str(args))
-    if args['dbpath']:
-      dbPath = args['dbpath']
-      _dbPath = '%s/database/%s' % (ApiPeer.apiBase, dbPath)
-      status  = os.path.exists(_dbPath)
-      logger.info('dbAdmin, get dbPath status at : %s ...' % dbPath)
-      return {'status':200,'dbpath':dbPath,'status':status}, 200
-    else:
-      return {'status':400,'error':"form parameter 'dbpath' not found"}, 400
-
-  # POST: cleanout an existind leveldb database region
-  def post(self):
-    args = parser.parse_args()
-    logger.info('args : ' + str(args))
-    if args['dbpath']:
-      dbPath = args['dbpath']
-      logger.info('dbAdmin, cleanout db region at : %s ...' % dbPath)
-      try:
-        with DbAdmin._lock:
-          _dbPath = '%s/database/%s' % (ApiPeer.apiBase, dbPath)
-          if not os.path.exists(_dbPath):
-            return {'status':400,'error':'dbPath does not exist','dbpath':dbPath}, 400
-          subprocess.call(['rm','-rf',_dbPath + '/*'])
-      except Exception as ex:
-        return {'status':500,'error':str(ex)}, 500
-      else:
-        return {'status':201,'dbpath':dbPath}, 201
-    else:
-      return {'status':400,'error':"form parameter 'dbpath' not found"}, 400
-
-  # PUT: make a new leveldb database region
-  def put(self):
-    args = parser.parse_args()
-    logger.info('args : ' + str(args))
-    if args['dbpath']:
-      dbPath = args['dbpath']
-      logger.info('dbAdmin, put db region at : %s ...' % dbPath)
-      try:
-        with DbAdmin._lock:
-          _dbPath = '%s/database/%s' % (ApiPeer.apiBase, dbPath)
-          subprocess.call(['mkdir','-p',_dbPath])
-      except Exception as ex:
-        return {'status':500,'error':str(ex)}, 500
-      else:
-        return {'status':201,'dbpath':dbPath}, 201
-    else:
-      return {'status':400,'error':"form parameter 'dbpath' not found"}, 400
-    
-  # DELETE: delete a leveldb database region
-  # TODO : add an appdb lock register to enable adding a dblock while an app runs
-  def delete(self):
-    args = parser.parse_args()
-    logger.info('args : ' + str(args))
-    if args['dbpath']:
-      dbPath = args['dbpath']
-      logger.info('dbAdmin, delete db region at : %s ...' % dbPath)
-      try:
-        with DbAdmin._lock:
-          _dbPath = '%s/database/%s' % (ApiPeer.apiBase, dbPath)
-          if not os.path.exists(_dbPath):
-            return {'status':400,'error':'dbPath does not exist','dbpath':dbPath}, 400
-          subprocess.call(['rm','-rf',_dbPath])
-      except OSError as ex:
-        return {'status':500,'error':str(ex)}, 500
-      else:
-        return {'status':201,'dbpath':dbPath}, 201
-    else:
-      return {'status':400,'error':"form parameter 'dbpath' not found"}, 400
-
-# ping to test if server is up
 class SaasAdmin(Resource):
   _lock = RLock()
 
@@ -275,6 +197,8 @@ class SaasAdmin(Resource):
       logger.info('job args : ' + str(params))
       try:      
         return g.prvdr.resolve(params)
+      except ContractError as ex:
+        return {'status':400,'error':str(ex)}, 400
       except Exception as ex:
         return {'status':500,'error':str(ex)}, 500
     else:
@@ -383,7 +307,6 @@ class ApiPeer(object):
     flaskApi.add_resource(SyncJob, '/api/v1/sync')
     flaskApi.add_resource(ServiceManager, '/api/v1/service/<serviceName>')
     flaskApi.add_resource(Ping, '/api/v1/ping')
-    flaskApi.add_resource(DbAdmin, '/api/v1/dbadmin')
     flaskApi.add_resource(SaasAdmin, '/api/v1/saas/<owner>/<product>/<category>')
     flask.add_url_rule('/api/v1/shutdown',view_func=shutdown_server)
 

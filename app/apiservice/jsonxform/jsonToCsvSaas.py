@@ -23,7 +23,8 @@
 from __future__ import division
 from abc import ABCMeta, abstractmethod
 from apibase import AppDirector, AppListener, AppResolvar, MetaReader, logger
-from jsonToCsvXform import JsonMember
+from jsonToCsvXform import HHProvider
+from apitools.hardhash import LeveldbClient
 from apitools.jsonxform import XformMetaPrvdr
 from apitools.mailer import XformEmailPrvdr
 from threading import RLock
@@ -66,7 +67,6 @@ class JsonToCsvSaas(AppDirector):
     try:
       mPrvdr = MetaPrvdr(self._leveldb, self.actorId)
       self.jobId, self.tsXref = mPrvdr()
-      #XformEmailPrvdr.start('jsonToCsvSaas',{})
       self.resolve._start(mPrvdr)
       self.mPrvdr = mPrvdr
     except Exception as ex:
@@ -86,6 +86,16 @@ class JsonToCsvSaas(AppDirector):
         self.state.inTransition = False
       else:
         errmsg = 'NORMALISE_ASYNC failed, returned error signal : %d' % signal
+        self.newMail('ERR1','system error',errmsg)
+        raise SaasError(errmsg)
+    elif self.state.transition == 'WRITE_CSV_ASYNC':
+      # signal = the http status code of the companion promote method
+      if signal == 201:
+        logger.info('WRITE_CSV_ASYNC is resolved, advancing ...')
+        self.state.transition = 'NA'
+        self.state.inTransition = False
+      else:
+        errmsg = 'WRITE_CSV_ASYNC failed, returned error signal : %d' % signal
         self.newMail('ERR1','system error',errmsg)
         raise SaasError(errmsg)
     elif self.state.transition == 'FINAL_HANDSHAKE':
@@ -108,7 +118,7 @@ class JsonToCsvSaas(AppDirector):
   def quicken(self):
     self.method = 'quicken'
     try:    
-      if self.state.transition in ['NORMALISE_ASYNC','FINAL_HANDSHAKE']:
+      if self.state.transition in ['WRITE_CSV_ASYNC','NORMALISE_ASYNC','FINAL_HANDSHAKE']:
         self.putApiRequest(201)
     except Exception as ex:
       self.newMail('ERR1','api request failed',str(ex))
@@ -129,12 +139,21 @@ class JsonToCsvSaas(AppDirector):
       logger.info('api response ' + response.text)
     elif self.state.transition == 'NORMALISE_ASYNC':
       classRef = 'jsonxform.jsonToCsvXform:JsonNormaliser'
-      args = [self.tsXref, self.resolve.jsonFileName]
-      pdata = (self.actorId,classRef,json.dumps(args))
+      pdata = (self.actorId,classRef,json.dumps([self.tsXref]))
       params = '{"type":"delegate","id":"%s","service":"%s","args":%s}' % pdata
       data = [('job',params)]
       apiUrl = 'http://%s/api/v1/async/%d' \
                         % (self.mPrvdr['hostName'], self.resolve.jobRange)
+      response = requests.post(apiUrl,data=data)
+      logger.info('api response ' + response.text)
+    elif self.state.transition == 'WRITE_CSV_ASYNC':
+      logger.info('DEBUG 3000')
+      classRef = 'jsonxform.jsonToCsvXform:CsvComposer'
+      pdata = (self.actorId,classRef,json.dumps([self.tsXref, self.resolve.jobRange]))
+      params = '{"type":"delegate","id":"%s","service":"%s","args":%s}' % pdata
+      data = [('job',params)]
+      apiUrl = 'http://%s/api/v1/async/%d' \
+                        % (self.mPrvdr['hostName'], self.resolve.csvRange)
       response = requests.post(apiUrl,data=data)
       logger.info('api response ' + response.text)
 
@@ -181,6 +200,16 @@ def getLineCount(fname):
   return i
 
 # -------------------------------------------------------------- #
+# getSplitFileTag
+# ---------------------------------------------------------------#
+def getSplitFileTag(taskNum):
+  tagOrd = int((taskNum-1) / 26)
+  tagChr1 = chr(ord('a') + tagOrd)
+  tagOrd = int((taskNum-1) % 26)
+  tagChr2 = chr(ord('a') + tagOrd)
+  return tagChr1 + tagChr2
+
+# -------------------------------------------------------------- #
 # ResolveError
 # ---------------------------------------------------------------#
 class ResolveError(Exception):
@@ -196,6 +225,7 @@ class Resolvar(AppResolvar):
     self.method = '__init__'
     self.__dict__['EVAL_XFORM_META'] = self.EVAL_XFORM_META
     self.__dict__['NORMALISE_JSON'] = self.NORMALISE_JSON
+    self.__dict__['WRITE_CSV_FILES'] = self.WRITE_CSV_FILES
     self.__dict__['MAKE_ZIP_FILE'] = self.MAKE_ZIP_FILE
     self.__dict__['REMOVE_WORKSPACE'] = self.REMOVE_WORKSPACE
 
@@ -236,8 +266,28 @@ class Resolvar(AppResolvar):
   def NORMALISE_JSON(self):
     try:
       self.evalSysStatus()
-      self.putXformMeta()
+      setSize = self.putXformMeta()
+      self.getHardHashService(setSize)
       self.state.transition = 'NORMALISE_ASYNC'
+      self.state.inTransition = True
+      self.state.next = 'WRITE_CSV_FILES'
+      self.state.hasNext = True
+      #self.state.complete = True
+      return self.state
+    except ResolveError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ResolveError(ex)
+
+  # -------------------------------------------------------------- #
+  # WRITE_CSV_FILES
+  # - state.next = 'MAKE_ZIP_FILE'
+  # ---------------------------------------------------------------#
+  def WRITE_CSV_FILES(self):
+    try:    
+      self.getWriteTaskRange()
+      self.state.transition = 'WRITE_CSV_ASYNC'
       self.state.inTransition = True
       self.state.next = 'MAKE_ZIP_FILE'
       self.state.hasNext = True
@@ -254,8 +304,6 @@ class Resolvar(AppResolvar):
   # ---------------------------------------------------------------#
   def MAKE_ZIP_FILE(self):
     try:
-      JsonMember.reset()
-      self.writeCsvFiles()
       self.makeGZipFile()
       self.state.transition = 'FINAL_HANDSHAKE'
       self.state.inTransition = True
@@ -274,7 +322,8 @@ class Resolvar(AppResolvar):
   def REMOVE_WORKSPACE(self):
     try:
       self.removeWorkSpace()
-      self.purgeXformData()
+      self.closeHardHashService()
+      HHProvider.delete(self.tsXref)
       self.state.hasNext = False
       self.state.complete = True
       return self.state
@@ -379,10 +428,21 @@ class Resolvar(AppResolvar):
       errmsg = 'command failed : ' + str(cmdArgs)
       self.newMail('ERR1',errmsg,str(ex))
       raise ResolveError(errmsg)
+    for i in range(1, self.jobRange+1):
+      self.putSplitFilename(i)
 
     dbKey = '%s|REPO|workspace' % self.tsXref
     self._leveldb.Put(dbKey, workSpace)
     self.workSpace = workSpace
+
+  # -------------------------------------------------------------- #
+  # putSplitFilename
+  # ---------------------------------------------------------------#
+  def putSplitFilename(self, taskNum):
+    fileTag = getSplitFileTag(taskNum)
+    splitFileName = self.jobId + fileTag
+    dbKey = '%s|TASK|%d|INPUT|jsonFile' % (self.tsXref, taskNum)
+    self._leveldb.Put(dbKey, splitFileName)
 
   # -------------------------------------------------------------- #
   # putXformMeta
@@ -395,77 +455,50 @@ class Resolvar(AppResolvar):
       for nodeName in self.xformMeta.get():
         metaIndex += 1
         csvMeta = self.xformMeta.get(nodeName)
-        #self.db[dbKey] = csvMeta
-        dbKey = '%s|XFORM|META|%d' % (self.tsXref, metaIndex)
-        self._leveldb.Put(dbKey,json.dumps(csvMeta))
         dbKey = '%s|XFORM|META|%s' % (self.tsXref, nodeName)
         self._leveldb.Put(dbKey,json.dumps(csvMeta))
+        dbKey = '%s|XFORM|CSVNAME|%d' % (self.tsXref, metaIndex)
+        self._leveldb.Put(dbKey, csvMeta['tableName'])
+        csvPath = '%s/%s.csv' % (self.workSpace, csvMeta['tableName'])
+        dbKey = '%s|XFORM|CSVPATH|%d' % (self.tsXref, metaIndex)
+        self._leveldb.Put(dbKey, csvPath)
         logger.info('jsonToCsv %s meta index : %d' % (nodeName, metaIndex))
         logger.info('%s meta item : %s ' % (nodeName, str(csvMeta)))
+      return metaIndex
     except Exception as ex:
-      errmsg = 'failed to store %s meta item' % nodeName
-      self.newMail('ERR1',errmsg,str(ex))
-      raise ResolveError(errmsg)
+      self.newMail('ERR1','system error',str(ex))
+      raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
-  # writeCsvFiles
+  # getHardHashService - get a HardHash service instance
   # ---------------------------------------------------------------#
-  def writeCsvFiles(self):
-    self.method = 'writeCsvFiles'
+  def getHardHashService(self, setSize):    
+    self.method = 'getHardHashService'
     try:
-      for csvName in self.xformMeta.get(attrName='tableName'):
-        csvPath = '%s/%s.csv' % (self.workSpace, csvName)
-        with open(csvPath,'w') as csvFh:
-          self.writeCsvFile(csvFh, csvName)
+      params = {"id":None,"setSize":self.jobRange}
+      data = [('job',json.dumps(params))]
+      apiUrl = 'http://localhost:5500/api/v1/hardhash'
+      response = requests.post(apiUrl,data=data)
+      logger.info('api response ' + response.text)
+      rdata = json.loads(response.text) 
+      self.datastoreId = rdata['datastoreId'] 
+      HHProvider.start(self.tsXref, rdata['routerAddr'])
+      logger.info('### HardHash routerAddr : ' + rdata['routerAddr'])
     except Exception as ex:
-      errmsg = '%s write failed' % csvName
-      self.newMail('ERR1',errmsg,str(ex))
-      raise ResolveError(errmsg)
+      self.newMail('ERR1','system error',str(ex))
+      raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
-  # writeCsvFile
+  # getWriteTaskRange
   # ---------------------------------------------------------------#
-  def writeCsvFile(self, csvFh, csvName):
-    self.method = 'writeCsvFile'
-    self.writeHeader(csvFh, csvName)
-    jobRange = xrange(1,self.jobRange+1)
-    for jobNum in jobRange:
-      rangeKey = '%s|%s|%02d' % (self.tsXref, csvName, jobNum)
-      rowIter = self.getIterByRangeKey(rangeKey)
-      for row in rowIter:
-        record = ','.join(json.loads(row))
-        csvFh.write(record + '\n')
-
-  # -------------------------------------------------------------- #
-  # writeHeader
-  # ---------------------------------------------------------------#
-  def writeHeader(self, csvFh, csvName):
-    self.method = 'writeHeader'
+  def getWriteTaskRange(self):
+    self.method = 'getWriteTaskRange'
     try:
-      dbKey = '%s|%s|header' % (self.tsXref, csvName)
-      header = self._leveldb.Get(dbKey)
-      record = ','.join(json.loads(header))
-      csvFh.write(record + '\n')
-    except KeyError:
-      errmsg = 'header key not found in db : ' + dbKey
-      self.newMail('ERR1','system error',errmsg)
-      raise ResolveError(errmsg)
-
-  # -------------------------------------------------------------- #
-  # getIterByRangeKey
-  # ---------------------------------------------------------------#
-  def getIterByRangeKey(self, rangeKey):
-    self.method = 'getIterByRangeKey'
-    keyLow = rangeKey + '|00001'
-    keyHigh = rangeKey + '|99999'
-    rowIter = self._leveldb.RangeIter(key_from=keyLow,key_to=keyHigh)
-    while True:
-      try:
-        key, value = rowIter.next()
-        yield value
-      except StopIteration:
-        break
-
+      self.csvRange = len(self.xformMeta.get())
+    except Exception as ex:
+      self.newMail('ERR1','system error',str(ex))
+      raise ResolveError(ex)
+    
   # -------------------------------------------------------------- #
   # makeGZipFile
   # ---------------------------------------------------------------#
@@ -497,33 +530,20 @@ class Resolvar(AppResolvar):
       raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
-  # purgeXformData
+  # closeHardHashService
   # ---------------------------------------------------------------#
-  def purgeXformData(self):
-    self.method = 'purgeXformData'
-    logger.info('purging xform data ...')
+  def closeHardHashService(self):
+    self.method = 'closeHardHashService'
     try:
-      self._purgeXformData()
+      params = {"id":self.datastoreId}
+      data = [('job',json.dumps(params))]
+      apiUrl = 'http://localhost:5500/api/v1/hardhash'
+      response = requests.delete(apiUrl,data=data)
+      logger.info('api response ' + response.text)
+      logger.info('### HardHash %s is now deleted' % self.datastoreId)
     except Exception as ex:
-      errmsg = 'purge xform data failed'
-      self.newMail('ERR1',errmsg,str(ex))
-      raise ResolveError(errmsg)
-
-  # -------------------------------------------------------------- #
-  # _purgeXformData
-  # ---------------------------------------------------------------#
-  def _purgeXformData(self):
-    self.method = '_purgeXformData'
-    startKey = '%s|0' % self.tsXref
-    endKey = '%s|]' % self.tsXref
-    batch = leveldb.WriteBatch()
-    keyIter = self._leveldb.RangeIter(startKey, endKey, include_value=False)
-    try:
-      while True:
-        key = keyIter.next()
-        batch.Delete(key)
-    except StopIteration:
-      self._leveldb.Write(batch, sync=True)
+      self.newMail('ERR1','HardHash closure failed',str(ex))
+      raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
   # newMail
@@ -563,7 +583,7 @@ class NormaliseLstnr(AppListener):
       if event.exception:
         self.hasError = True
         self.putApiRequest(500)
-      elif self.state.transition == 'NORMALISE_ASYNC':
+      elif self.state.transition in ['WRITE_CSV_ASYNC','NORMALISE_ASYNC']:
         self.evalEvent(event.job_id)
 
   # -------------------------------------------------------------- #
@@ -685,9 +705,6 @@ class MetaPrvdr(MetaReader):
       self.jobMeta['client'] = _jobMeta[className]
       logger.info('### CLIENT JOB_META : ' + str(self.jobMeta['client']))        
       self.tsXref = datetime.datetime.now().strftime('%y%m%d%H%M%S')
-      #tsXref = '181223155620'
-      #dbKey = 'TSXREF|' + self.actorId
-      #self._leveldb.Put(dbKey, tsXref)
       logger.info('### jobId, tsXref : %s, %s' % (self.jobId, self.tsXref))
       return (self.jobId, self.tsXref)
     except MetaPrvdrError:

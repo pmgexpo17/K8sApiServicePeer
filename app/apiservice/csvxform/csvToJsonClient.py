@@ -401,7 +401,10 @@ class MetaPrvdr(MetaReader):
         hostName = self.jobMeta['hostName']
       apiUrl = 'http://%s/api/v1/saas/%s' % (hostName, self.jobMeta[domainKey])
       response = requests.get(apiUrl,data=data)
-      return json.loads(response.text)
+      result = json.loads(response.text)
+      if 'error' in result:
+        raise Exception(result['error'])
+      return result
     except Exception as ex:
       self.newMail('ERR1','system error',str(ex))
       raise MetaPrvdrError(ex)

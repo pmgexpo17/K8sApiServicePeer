@@ -224,10 +224,9 @@ class AppProvider(object):
       except (AttributeError, KeyError):
         pass
       else:
-        args = (delegate.__class__.__name__,delegate.jobId,caller.__class__.__name__,delegate.caller)
-        logMsg = 'delegate %s, %s failed, notifying caller %s, %s' % args
-        logger.info(logMsg)
-        #caller.onError(ex)
+        logMsg = 'delegate %s failed : %s' % (delegate.__class__.__name__, str(ex))
+        logger.error(logMsg)
+        raise Exception(ex)
 
   # -------------------------------------------------------------- #
   # removeMeta

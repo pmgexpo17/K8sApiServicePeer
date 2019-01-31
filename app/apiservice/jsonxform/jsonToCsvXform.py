@@ -22,21 +22,98 @@
 #
 from __future__ import division
 from abc import ABCMeta, abstractmethod
+from apitools.hardhash import LeveldbClient
 from apitools.mailer import XformEmailPrvdr
 from collections import deque, OrderedDict
 from threading import RLock
 import logging
 import os, sys, time
 import simplejson as json
+import zmq
 
 logger = logging.getLogger('apiservice.async')
 
-def getFileTag(taskNum):
-  tagOrd = int((taskNum-1) / 26)
-  tagChr1 = chr(ord('a') + tagOrd)
-  tagOrd = int((taskNum-1) % 26)
-  tagChr2 = chr(ord('a') + tagOrd)
-  return tagChr1 + tagChr2
+#------------------------------------------------------------------#
+# HHProvider
+# factory dict id to enable multiple current sessions, where the 
+# the session id is tsXref
+#------------------------------------------------------------------#
+class HHProvider(object):
+  lock = RLock()
+  factory = {}
+
+  def __init__(self, tsXref, routerAddr):
+    self.tsXref = tsXref
+    self.prefix = '%s|' % tsXref
+    self.routerAddr = routerAddr
+    self._cache = {}
+    self._nodeName = {}
+    self._context = zmq.Context.instance()
+    self.lock = RLock()    
+
+	#------------------------------------------------------------------#
+	# start -
+  # - normaliseFactory threads depend on initial HHProvider creation
+	#------------------------------------------------------------------#
+  @staticmethod
+  def start(tsXref, routerAddr):
+    with HHProvider.lock:
+      if tsXref not in HHProvider.factory:
+        HHProvider.factory[tsXref] = HHProvider(tsXref, routerAddr)
+
+	#------------------------------------------------------------------#
+	# remove
+	#------------------------------------------------------------------#
+  @staticmethod
+  def delete(tsXref):
+    with HHProvider.lock:
+      if tsXref in HHProvider.factory:
+        logger.info('### HHProvider %s will be deleted ...' % tsXref)
+        HHProvider.factory[tsXref].terminate()
+        del HHProvider.factory[tsXref]  
+        logger.info('### HHProvider %s is deleted' % tsXref)
+
+	#------------------------------------------------------------------#
+	# close
+	#------------------------------------------------------------------#
+  @staticmethod
+  def close(tsXref, clientId):
+    with HHProvider.lock:
+      HHProvider.factory[tsXref]._close(clientId)
+
+	#------------------------------------------------------------------#
+	# _close
+	#------------------------------------------------------------------#
+  def _close(self, clientId):
+    try:
+      self._cache[clientId].close()
+      del self._cache[clientId]
+    except KeyError:
+      raise Exception('%s factory, client %s not found in cache' % (self.tsXref, clientId))
+    except zmq.ZMQError as ex:
+      raise Exception('%s factory, client %s closure failed : %s' % (self.tsXref, clientId, str(ex)))
+
+	#------------------------------------------------------------------#
+	# terminate
+	#------------------------------------------------------------------#
+  def terminate(self):
+    try:
+      [client.close() for key, client in self._cache.items()]
+      self._context.term()
+    except zmq.ZMQError as ex:
+      raise Exception('%s factory closure failed : %s' % (self.tsXref, str(ex)))
+
+	#------------------------------------------------------------------#
+	# get
+	#------------------------------------------------------------------#
+  def get(self, clientId):
+    with self.lock:
+      if clientId in self._cache:
+        return self._cache[clientId]
+      hhClient = LeveldbClient.make(self._context, self.routerAddr, prefix=self.prefix)
+      self._cache[clientId] = hhClient
+      logger.info('### %s factory, client created by clientId : %s' % (self.tsXref, clientId))
+      return hhClient
 
 # -------------------------------------------------------------- #
 # NormaliseError
@@ -58,30 +135,35 @@ class JsonNormaliser(object):
   # -------------------------------------------------------------- #
   # __call__
   # ---------------------------------------------------------------#
-  def __call__(self, tsXref, jsonFileName, taskNum):
-    self.method = 'jsonToCsvXform.JsonNormaliser.__call__'
+  def __call__(self, tsXref, taskNum):
+    self.method = '__call__'
     try:
       dbKey = '%s|REPO|workspace' % tsXref
       workSpace = self._leveldb.Get(dbKey)
-      fileTag = getFileTag(taskNum)
-      inputJsonFile = jsonFileName + fileTag
-      logger.info('### normalise workspace : ' + workSpace)
-      logger.info('### split file name : ' + inputJsonFile)
+      dbKey = '%s|TASK|%d|INPUT|jsonFile' % (tsXref, taskNum)
+      inputJsonFile = self._leveldb.Get(dbKey)
+      dbKey = '%s|XFORM|rootname' % tsXref
+      rootName = self._leveldb.Get(dbKey)
+
+      logger.info('### normalise workspace : %s' % workSpace)
+      logger.info('### task|%02d input json file : %s ' % (taskNum, inputJsonFile))
+      logger.info('### xform root nodename : ' + rootName)
+
       jsonFilePath = workSpace + '/' + inputJsonFile
       if not os.path.exists(jsonFilePath):
         errmsg = '%s does not exist in workspace' % inputJsonFile
         raise Exception(errmsg)
-
-      JsonMember.start(self._leveldb, tsXref)
+      factory = MemberFactory(self._leveldb, tsXref, taskNum)
+      self.rootMember = factory.get(rootName)
       with open(jsonFilePath) as jsfh:
-        jsonDom = list(self.getJsDomAsQueue(taskNum))      
+        jsonDom = list(self.getJsDomAsQueue())
         recnum = 1
         for jsRecord in jsfh:
           self.normalise(jsRecord, jsonDom)
           recnum += 1
-        logger.info('### JsonNormaliser split file %s rowcount : %d' % (fileTag, recnum))
+        logger.info('### %s rowcount : %d' % (inputJsonFile, recnum))
     # apscheduler will only catch BaseException, EVENT_JOB_ERROR will not fire otherwise
-    except (NormaliseError, JsonMemberError) as ex:
+    except (NormaliseError, CompileError) as ex:
       errmsg = 'splitfile, recnum : %s, %d' % (inputJsonFile, recnum)
       self.newMail('ERR2','normalise failed',errmsg)
       raise BaseException(ex)
@@ -92,22 +174,18 @@ class JsonNormaliser(object):
 	#------------------------------------------------------------------#
 	# getJsDomAsQueue
 	#------------------------------------------------------------------#
-  def getJsDomAsQueue(self, taskNum):
+  def getJsDomAsQueue(self):
     self.method = 'getJsDomAsQueue'
     try:
-      with JsonMember.lock:
-        logger.info('task %d MemberFactory.getJsDomAsQueue' % taskNum)
-        from collections import deque
-        self.rootMember = JsonMember.getRoot(taskNum)
-        domQueue = deque(self.rootMember.getMembers())
-        while domQueue:
-          nextMember = domQueue.popleft()
-          #logger.debug('### Next member : ' + nextMember.name)
-          memberList = nextMember.getMembers()
-          if memberList:
-            domQueue.extendleft(memberList)        
-          yield nextMember
-    except JsonMemberError as ex:
+      from collections import deque
+      domQueue = deque(self.rootMember.getMembers())
+      while domQueue:
+        nextMember = domQueue.popleft()
+        memberList = nextMember.getMembers()
+        if memberList:
+          domQueue.extendleft(memberList)        
+        yield nextMember
+    except CompileError as ex:
       raise
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
@@ -126,7 +204,7 @@ class JsonNormaliser(object):
       self.putDatasets(jsonDom)
     except NormaliseError:
       raise    
-    except JsonMemberError as ex:
+    except CompileError as ex:
       self.method = 'normalise'
       raise
     except Exception as ex:
@@ -159,7 +237,7 @@ class JsonNormaliser(object):
             #logger.debug('Leaf node found !')
             self.putDsByMember(nextMember)
         self.rootMember.putDataset()
-    except JsonMemberError:
+    except CompileError:
       raise
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
@@ -178,7 +256,7 @@ class JsonNormaliser(object):
         nextMember.putDataset()
         #logger.debug('%s has dataset : %s' % (nextMember.name, str(nextMember.hasDataset)))      
         nextMember = nextMember.parent
-    except JsonMemberError:
+    except CompileError:
       raise
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
@@ -193,9 +271,9 @@ class JsonNormaliser(object):
     XformEmailPrvdr.newMail('jsonToCsvSaas',bodyKey,method,*args)
 
 # -------------------------------------------------------------- #
-# JsonMemberError
+# CompileError
 # ---------------------------------------------------------------#
-class JsonMemberError(Exception):
+class CompileError(Exception):
   pass
 
 # -------------------------------------------------------------- #
@@ -203,42 +281,17 @@ class JsonMemberError(Exception):
 # ---------------------------------------------------------------#
 class MemberFactory(object):
 
-  def __init__(self, leveldb, tsXref):
+  def __init__(self, leveldb, tsXref, taskNum):
     self._leveldb = leveldb
     self.tsXref = tsXref
-    self.lock = RLock()
-    self.rootName = None
+    self.taskNum = taskNum
     self.method = '__init__'
 
   # -------------------------------------------------------------- #
   # get
   # ---------------------------------------------------------------#
-  def get(self, nodeName, parent):
-    with self.lock:
-      return self._get(nodeName, parent)
-
-  # -------------------------------------------------------------- #
-  # getRoot
-  # ---------------------------------------------------------------#
-  def getRoot(self, taskNum):
-    self.method = 'getRoot'
-    try:
-      self.taskNum = taskNum
-      if self.rootName is None:
-        dbKey = '%s|XFORM|rootname' % self.tsXref
-        self.rootName = self._leveldb.Get(dbKey)
-      return self._get(self.rootName, None)
-    except JsonMemberError:
-      raise
-    except Exception as ex:
-      self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
-
-  # -------------------------------------------------------------- #
-  # get
-  # ---------------------------------------------------------------#
-  def _get(self, nodeName, parent):
-    self.method = '_get'
+  def get(self, nodeName, parent=None):
+    self.method = 'get'
     try:
       dbKey = '%s|XFORM|META|%s' % (self.tsXref, nodeName)
       metaData = self._leveldb.Get(dbKey)
@@ -252,36 +305,29 @@ class MemberFactory(object):
         errmsg = 'xformMeta class %s does not exist in %s' % (className, __name__)
         self.newMail('ERR2','system error',errmsg)
         raise
-      memberObj = klass(self._leveldb, parent)
-      memberObj.applyMeta(self.tsXref, self.taskNum, xformMeta)
-      return memberObj
+      obj = klass(self, parent)
+      obj.start(self.tsXref, self.taskNum, xformMeta)
+      return obj
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
+      raise CompileError(ex)
 
   # -------------------------------------------------------------- #
   # getMembers
   # ---------------------------------------------------------------#
   def getMembers(self, parent):
-    with self.lock:
-      return self._getMembers(parent)
-
-  # -------------------------------------------------------------- #
-  # getMembers
-  # ---------------------------------------------------------------#
-  def _getMembers(self, parent):
-    self.method = '_getMembers'
+    self.method = 'getMembers'
     try:
       memberList = []
       for nodeName in parent.children:
         logger.info('%s member : %s ' % (parent.name, nodeName))
-        memberList.append(self._get(nodeName, parent))
+        memberList.append(self.get(nodeName, parent))
       return memberList
-    except JsonMemberError:
+    except CompileError:
       raise
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
+      raise CompileError(ex)
 
   # -------------------------------------------------------------- #
   # newMail
@@ -327,42 +373,16 @@ class RowIndex(object):
 #------------------------------------------------------------------#
 # JsonMember
 #------------------------------------------------------------------#
-class JsonMember(Exception):
+class JsonMember(object):
   __metaclass__ = ABCMeta
   lock = None
-  factory = None
 
-  def __init__(self, leveldb, parent=None):
-    self._leveldb = leveldb
+  def __init__(self, factory, parent):
+    self._hh = None
+    self.factory = factory
     self.parent = parent
     self.isRoot = False
     self.method = '__init__'
-
-	#------------------------------------------------------------------#
-	# getRootMember
-	#------------------------------------------------------------------#
-  @staticmethod
-  def getRoot(taskNum):
-    return JsonMember.factory.getRoot(taskNum)
-
-	#------------------------------------------------------------------#
-	# reset
-	#------------------------------------------------------------------#
-  @staticmethod
-  def reset():
-    with JsonMember.lock:
-      JsonMember.factory = None
-
-	#------------------------------------------------------------------#
-	# start
-	#------------------------------------------------------------------#
-  @staticmethod
-  def start(leveldb, tsXref):
-    if JsonMember.lock is None:
-      JsonMember.lock = RLock()
-    if JsonMember.factory is None:    
-      JsonMember.factory = MemberFactory(leveldb, tsXref)
-    logger.info('### factory tsXref : %s' % JsonMember.factory.tsXref)
 
   # -------------------------------------------------------------- #
   # _getDataset
@@ -379,10 +399,19 @@ class JsonMember(Exception):
     pass
 
 	#------------------------------------------------------------------#
+	# start
+	#------------------------------------------------------------------#
+  def start(self, tsXref, taskNum, xformMeta):
+    self.method = 'start' 
+    self.applyMeta(tsXref, taskNum, xformMeta)
+    clientId = 'task%02d' % taskNum
+    self._hh = HHProvider.factory[tsXref].get(clientId)
+
+	#------------------------------------------------------------------#
 	# applyMeta
 	#------------------------------------------------------------------#
   def applyMeta(self, tsXref, taskNum, xformMeta):
-    self.method = 'applyMeta'
+    self.method = 'start'
     try:
       self.tsXref = tsXref
       self.name = xformMeta['nodeName']
@@ -400,7 +429,7 @@ class JsonMember(Exception):
         self.rowIndex = rindexClass
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# getMembers
@@ -415,11 +444,11 @@ class JsonMember(Exception):
         return memberList
       memberList.reverse()
       return memberList
-    except JsonMemberError:
+    except CompileError:
       raise
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# evalDataset
@@ -433,11 +462,11 @@ class JsonMember(Exception):
       self.csvDataset = self.getDataset()
       if self.hasDataset:
         self.putHeader()
-    except JsonMemberError:
+    except CompileError:
       raise
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# getDataset
@@ -450,7 +479,7 @@ class JsonMember(Exception):
       errmsg = '%s json object %s does not exist in csv dataset ' \
                                               % (self.name, str(ex))
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(errmsg)
+      raise CompileError(errmsg)
     if not csvDataset: # empty list or dict
       csvDataset = [] # if dict, convert empty dict to list
     elif not isinstance(csvDataset,list):
@@ -471,15 +500,14 @@ class JsonMember(Exception):
         errmsg = '%s key %s does not exist in json record' \
                                             % (self.name, keyName)
         self.newMail('ERR2','system error',errmsg)
-        raise JsonMemberError(errmsg)
-      record = list(csvObject.keys())
-      dbKey = self.name + '|header'
-      self.putRecord(dbKey, record)
-    except JsonMemberError:
+        raise CompileError(errmsg)
+      dbKey = '%s|header' % self.name
+      self._hh[dbKey] = list(csvObject.keys())
+    except CompileError:
       raise
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
+      raise CompileError(ex)
 
 	#------------------------------------------------------------------#
 	# putCsvObject
@@ -489,66 +517,13 @@ class JsonMember(Exception):
     try:
       # self.rowIndex.incCount = klass.incCount
       rowIndex = self.rowIndex.incCount()
-      record = list(csvObject.values())
       dbKey = '%s|%s' % (self.name, rowIndex)
-      self.putRecord(dbKey, record)
-    except JsonMemberError:
+      self._hh[dbKey] = list(csvObject.values())
+    except CompileError:
       raise
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
-
-	#------------------------------------------------------------------#
-	# getRecord
-	#------------------------------------------------------------------#
-  def getRecord(self, dbKey, restore=True):
-    self.method = 'getRecord'
-    dbKey = '%s|%s' % (self.tsXref, dbKey)
-    #logger.debug('### dbKey : ' + dbKey)
-    try:
-      record = self._leveldb.Get(dbKey)
-      if restore:
-        return json.loads(record)
-      return record
-    except KeyError:
-      return None
-    except Exception as ex:
-      self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
-
-	#------------------------------------------------------------------#
-	# append
-	#------------------------------------------------------------------#
-  def append(self, dbKey, value):
-    self.method = 'append'
-    try:
-      record = self.getRecord(dbKey)
-      dbKey = '%s|%s' % (self.tsXref, dbKey)    
-      if not record:
-        self._leveldb.Put(dbKey, json.dumps([value]))
-      else:
-        record.append(value)
-        self._leveldb.Put(dbKey, json.dumps(record))
-    except JsonMemberError:
-      raise
-    except Exception as ex:
-      self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
-
-	#------------------------------------------------------------------#
-	# putRecord
-	#------------------------------------------------------------------#
-  def putRecord(self, dbKey, value):
-    self.method = 'putRecord'
-    try:
-      dbKey = '%s|%s' % (self.tsXref, dbKey)
-      if isinstance(value,basestring):
-        self._leveldb.Put(dbKey, value)
-      else:  
-        self._leveldb.Put(dbKey, json.dumps(value))
-    except Exception as ex:
-      self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
+      raise CompileError(ex)
 
   # -------------------------------------------------------------- #
   # newMail
@@ -565,10 +540,9 @@ class JsonMemberRN1(JsonMember):
   '''
   NormaliseJson, model - RootNode1
   ''' 
-  def __init__(self, leveldb, parent):
-    super(JsonMemberRN1, self).__init__(leveldb)
+  def __init__(self, *args):
+    super(JsonMemberRN1, self).__init__(*args)
     self.isRoot = True
-    self.errcode = 'NA'
 
   # -------------------------------------------------------------- #
   # _getDataset
@@ -588,7 +562,7 @@ class JsonMemberRN1(JsonMember):
         self.hasDataset = len(self.csvDataset) > 0
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
+      raise CompileError(ex)
 
 #------------------------------------------------------------------#
 # JsonMemberUKN1
@@ -597,8 +571,8 @@ class JsonMemberUKN1(JsonMember):
   '''
   JsonMemberJson, model - Unique Key Node 1
   ''' 
-  def __init__(self, leveldb, parent):
-    super(JsonMemberUKN1, self).__init__(leveldb, parent)
+  def __init__(self, *args):
+    super(JsonMemberUKN1, self).__init__(*args)
 
   # -------------------------------------------------------------- #
   # _getDataset
@@ -619,7 +593,7 @@ class JsonMemberUKN1(JsonMember):
         self.hasDataset = len(self.csvDataset) > 0
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
-      raise JsonMemberError(ex)
+      raise CompileError(ex)
 
 #------------------------------------------------------------------#
 # JsonMemberJsonFKN1
@@ -628,8 +602,8 @@ class JsonMemberFKN1(JsonMember):
   '''
   JsonMemberJson, model - Foreign Key Node 1
   ''' 
-  def __init__(self, leveldb, parent):
-    super(JsonMemberFKN1, self).__init__(leveldb, parent)
+  def __init__(self, *args):
+    super(JsonMemberFKN1, self).__init__(*args)
 
   # -------------------------------------------------------------- #
   # _getDataset
@@ -652,3 +626,124 @@ class JsonMemberFKN1(JsonMember):
     except Exception as ex:
       self.newMail('ERR2','system error',str(ex))
       raise
+
+#------------------------------------------------------------------#
+# ComposeError
+#------------------------------------------------------------------#
+class ComposeError(Exception):
+  pass
+
+#------------------------------------------------------------------#
+# CsvComposer
+#------------------------------------------------------------------#
+class CsvComposer(object):
+  def __init__(self, leveldb, jobId, caller):
+    self._leveldb = leveldb
+    self.jobId = jobId
+    self.caller = caller
+    self.method = '__init__'
+
+  #------------------------------------------------------------------#
+	# __call__
+	#------------------------------------------------------------------#
+  def __call__(self, tsXref, jobRange, taskNum):
+    self.method = '__call__'
+    try:
+      dbKey = '%s|XFORM|CSVPATH|%d' % (tsXref, taskNum)
+      csvPath = self._leveldb.Get(dbKey)
+      dbKey = '%s|XFORM|CSVNAME|%d' % (tsXref, taskNum)      
+      csvName = self._leveldb.Get(dbKey)
+      logger.info('### task|%02d output csv file : %s.csv' % (taskNum, csvName))
+
+      with open(csvPath,'w') as csvfh:
+        try:
+          writer = CsvWriter(csvName, jobRange)
+          writer.start(tsXref, taskNum)
+          writer.write(csvfh)
+          logger.info('### %s rowcount : %d' % (csvName, writer.total))
+        # apscheduler will only catch BaseException, EVENT_JOB_ERROR will not fire otherwise
+        except ComposeError as ex:
+          errmsg = '%s csv write failed' % csvName
+          self.newMail('ERR2',errmsg,str(ex))
+          raise BaseException(ex)
+        except Exception as ex:
+          self.newMail('ERR2','system error',str(ex))
+          raise BaseException(ex)
+    except Exception as ex:
+      self.newMail('ERR2','system error',str(ex))
+      raise BaseException(ex)
+
+  # -------------------------------------------------------------- #
+  # newMail
+  # ---------------------------------------------------------------#
+  def newMail(self, bodyKey, *args):
+    method = '%s.%s:%s' \
+      % (self.__class__.__module__, self.__class__.__name__, self.method)
+    XformEmailPrvdr.newMail('jsonToCsvSaas',bodyKey,method,*args)
+
+#------------------------------------------------------------------#
+# CsvWriter
+#------------------------------------------------------------------#
+class CsvWriter(object):
+  def __init__(self, csvName, jobRange):
+    self.csvName = csvName
+    self.jobRange = jobRange
+
+	#------------------------------------------------------------------#
+	# start
+	#------------------------------------------------------------------#
+  def start(self, tsXref, taskNum):
+    self.method = 'start' 
+    clientId = 'task%02d' % taskNum
+    self._hh = HHProvider.factory[tsXref].get(clientId)
+
+  #------------------------------------------------------------------#
+	# write
+	#------------------------------------------------------------------#
+  def write(self, csvfh):    
+    self.method = 'write'
+    try:
+      self.writeHeader(csvfh)
+      self.total = 0
+      for key, record in self.csvDataset():
+        csvfh.write(','.join(record) + '\n')
+        self.total += 1
+    except ComposeError:
+      raise
+    except Exception as ex:
+      self.newMail('ERR2','compose error',str(ex))
+      raise ComposeError(ex)
+
+  #------------------------------------------------------------------#
+	# csvDataset
+	#------------------------------------------------------------------#
+  def csvDataset(self):
+    self.method = 'csvDataset'
+    try:
+      keyLow = '%s|%02d|%05d' % (self.csvName,1,1)
+      keyHigh = '%s|%02d|%05d' % (self.csvName,self.jobRange,99999)
+      return self._hh.select(keyLow,keyHigh)
+    except Exception as ex:
+      self.newMail('ERR2','compose error',str(ex))
+      raise ComposeError(ex)
+
+  #------------------------------------------------------------------#
+	# writeHeader
+	#------------------------------------------------------------------#
+  def writeHeader(self, csvfh):
+    self.method = 'writeHeader'
+    try:
+      dbKey = '%s|header' % self.csvName
+      record = ','.join(self._hh[dbKey])
+      csvfh.write(record + '\n')
+    except Exception as ex:
+      self.newMail('ERR2','compose error',str(ex))
+      raise ComposeError(ex)
+
+  # -------------------------------------------------------------- #
+  # newMail
+  # ---------------------------------------------------------------#
+  def newMail(self, bodyKey, *args):
+    method = '%s.%s:%s' \
+      % (self.__class__.__module__, self.__class__.__name__, self.method)
+    XformEmailPrvdr.newMail('jsonToCsvSaas',bodyKey,method,*args)

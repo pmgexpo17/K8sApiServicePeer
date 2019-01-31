@@ -21,7 +21,7 @@
 # THE SOFTWARE.
 #
 from appProvider import AppProvider
-from apiPeer import ApiPeer as ApiPeer
+from apiPeer import ApiPeer
 from appDirector import (AppDirector, AppState, AppResolvar, AppListener,
   MetaReader, SysCmdUnit, logger)
 

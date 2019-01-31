@@ -27,6 +27,9 @@ import os
 
 logger = logging.getLogger('apiservice.smart')
 
+class ContractError(Exception):
+  pass
+
 # -------------------------------------------------------------- #
 # SaasEventMngr
 # ---------------------------------------------------------------#
@@ -45,8 +48,8 @@ class SaasEventMngr(object):
         _result = json.loads(result)[itemKey]
         result = json.dumps(_result)
     except KeyError:
-      errmsg = {'status':400,'error':'Saas EVENT data not found : ' + dbKey}
-      raise Exception(json.dumps(errmsg))
+      errmsg = 'Saas EVENT data not found : ' + dbKey
+      raise ContractError(errmsg)
     else:
       logger.info('SaasEventMngr, delivering EVENT info ... ')
       # since the result is already serialized json, send mimetype=text
@@ -71,8 +74,8 @@ class SaasRepoMngr(object):
         _result = json.loads(result)[itemKey]
         result = json.dumps(_result)
     except KeyError:
-      errmsg = {'status':400,'error':'Saas REPO data not found : ' + dbKey}
-      raise Exception(json.dumps(errmsg))
+      errmsg = 'Saas REPO data not found : ' + dbKey
+      raise ContractError(errmsg)
     else:
       logger.info('SaasRepoMngr, delivering REPO info ... ')
       # since the result is already serialized json, send mimetype=text
@@ -97,8 +100,8 @@ class SaasXformMngr(object):
         _result = json.loads(result)[itemKey]
         result = json.dumps(_result)
     except KeyError:
-      errmsg = {'status':400,'error':'Saas XFORM data not found : ' + dbKey}
-      raise Exception(json.dumps(errmsg))
+      errmsg = 'Saas XFORM data not found : ' + dbKey
+      raise ContractError(errmsg)
     else:
       logger.info('SaasXformMngr, delivering XFORM info ... ')
       # since the result is already serialized json, send mimetype=text

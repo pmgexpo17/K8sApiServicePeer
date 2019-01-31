@@ -24,7 +24,7 @@ from abc import ABCMeta, abstractmethod
 from apibase import AppDirector, AppListener, AppResolvar, MetaReader, logger
 from apitools.csvxform import XformMetaPrvdr
 from apitools.mailer import XformEmailPrvdr
-from csvToJsonXform import Compiler, CompileError
+from csvToJsonXform import HHProvider, CompilerFactory, CompileError
 from threading import RLock
 import datetime
 import leveldb
@@ -64,7 +64,6 @@ class CsvToJsonSaas(AppDirector):
     try:
       mPrvdr = MetaPrvdr(self._leveldb, self.actorId)
       self.jobId, self.tsXref = mPrvdr()
-      #XformEmailPrvdr.start('csvToJsonSaas',{})
       self.resolve._start(mPrvdr)
       self.mPrvdr = mPrvdr
     except Exception as ex:
@@ -86,6 +85,16 @@ class CsvToJsonSaas(AppDirector):
         errmsg = 'NORMALISE_ASYNC failed, returned error signal : %d' % signal
         self.newMail('ERR1','system error',errmsg)
         raise SaasError(errmsg)
+    elif self.state.transition == 'COMPOSE_JSON_ASYNC':
+      # signal = the http status code of the companion promote method
+      if signal == 201:
+        logger.info('COMPOSE_JSON_ASYNC is resolved, advancing ...')
+        self.state.transition = 'FINAL_HANDSHAKE'
+        self.state.inTransition = True
+      else:
+        errmsg = 'COMPOSE_JSON_ASYNC failed, returned error signal : %d' % signal
+        self.newMail('ERR1','system error',errmsg)
+        raise SaasError(errmsg)
     elif self.state.transition == 'FINAL_HANDSHAKE':
       # signal = the http status code of the companion promote method
       if signal == 201:
@@ -105,9 +114,8 @@ class CsvToJsonSaas(AppDirector):
   # ---------------------------------------------------------------#
   def quicken(self):
     self.method = 'quicken'
-    logger.info('quicken state transition : ' + self.state.transition)
     try:    
-      if self.state.transition in ['NORMALISE_ASYNC','FINAL_HANDSHAKE']:
+      if self.state.transition in ['COMPOSE_JSON_ASYNC','NORMALISE_ASYNC','FINAL_HANDSHAKE']:
         self.putApiRequest(201)
     except Exception as ex:
       self.newMail('ERR1','api request failed',str(ex))
@@ -127,13 +135,22 @@ class CsvToJsonSaas(AppDirector):
       apiUrl = 'http://%s/api/v1/smart' % self.mPrvdr['client:hostName']
       response = requests.post(apiUrl,data=data)
       logger.info('api response ' + response.text)
-    elif self.state.transition == 'NORMALISE_ASYNC':    
+    elif self.state.transition == 'NORMALISE_ASYNC':
       classRef = 'csvxform.csvToJsonXform:NormaliserFactory'
       pdata = (self.actorId,classRef,json.dumps([self.tsXref]))
       params = '{"type":"delegate","id":"%s","service":"%s","args":%s}' % pdata
       data = [('job',params)]
       apiUrl = 'http://%s/api/v1/async/%d' \
                         % (self.mPrvdr['hostName'], self.resolve.jobRange)
+      response = requests.post(apiUrl,data=data)
+      logger.info('api response ' + response.text)
+    elif self.state.transition == 'COMPOSE_JSON_ASYNC':
+      classRef = 'csvxform.csvToJsonXform:JsonComposer'
+      pdata = (self.actorId,classRef,json.dumps([self.tsXref]))
+      params = '{"type":"delegate","id":"%s","service":"%s","args":%s}' % pdata
+      data = [('job',params)]
+      apiUrl = 'http://%s/api/v1/async/%d' \
+                        % (self.mPrvdr['hostName'],1)
       response = requests.post(apiUrl,data=data)
       logger.info('api response ' + response.text)
 
@@ -187,8 +204,7 @@ class Resolvar(AppResolvar):
     self.method = '__init__'
     self.__dict__['EVAL_XFORM_META'] = self.EVAL_XFORM_META
     self.__dict__['NORMALISE_CSV'] = self.NORMALISE_CSV
-    self.__dict__['COMPILE_JSON'] = self.COMPILE_JSON
-    self.__dict__['WRITE_JSON_FILE'] = self.WRITE_JSON_FILE
+    self.__dict__['COMPOSE_JSON_FILE'] = self.COMPOSE_JSON_FILE
     self.__dict__['REMOVE_WORKSPACE'] = self.REMOVE_WORKSPACE
 
   # -------------------------------------------------------------- #
@@ -226,9 +242,10 @@ class Resolvar(AppResolvar):
     try:
       self.evalSysStatus()
       self.putXformMeta()
+      self.getHardHashService()
       self.state.transition = 'NORMALISE_ASYNC'
       self.state.inTransition = True
-      self.state.next = 'COMPILE_JSON'
+      self.state.next = 'COMPOSE_JSON_FILE'
       self.state.hasNext = True
       return self.state
     except Exception as ex:
@@ -236,29 +253,13 @@ class Resolvar(AppResolvar):
       raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
-  # COMPILE_JSON
-  # - state.next = complete
-  # ---------------------------------------------------------------#
-  def COMPILE_JSON(self):
-    try:
-      Compiler.start(self._leveldb, self.tsXref)
-      self.compileJson()
-      self.state.next = 'WRITE_JSON_FILE'
-      self.state.hasNext = True
-      return self.state
-    except Exception as ex:
-      self.newMail('ERR1','system error',str(ex))
-      raise ResolveError(ex)
-
-  # -------------------------------------------------------------- #
-  # WRITE_JSON_FILE
+  # COMPOSE_JSON_FILE
   # - state.next = 'REMOVE_WORKSPACE'
   # ---------------------------------------------------------------#
-  def WRITE_JSON_FILE(self):
+  def COMPOSE_JSON_FILE(self):
     try:
-      self.writeJsonFile()
-      self.compressFile()
-      self.state.transition = 'FINAL_HANDSHAKE'
+      self.putJsonFileMeta()
+      self.state.transition = 'COMPOSE_JSON_ASYNC'
       self.state.inTransition = True
       self.state.next = 'REMOVE_WORKSPACE'
       self.state.hasNext = True
@@ -273,7 +274,8 @@ class Resolvar(AppResolvar):
   def REMOVE_WORKSPACE(self):
     try:    
       self.removeWorkSpace()
-      self.purgeXformData()
+      self.closeHardHashService()
+      HHProvider.delete(self.tsXref)
       self.state.hasNext = False
       self.state.complete = True
       return self.state
@@ -299,7 +301,9 @@ class Resolvar(AppResolvar):
     try:
       xformMeta.load(metaFile)
       xformMeta.validate('csvToJson')
-      self.rootName = xformMeta.getRootName()            
+      self.rootName = xformMeta.getRootName()
+      dbKey = '%s|XFORM|rootname' % self.tsXref
+      self._leveldb.Put(dbKey,self.rootName)
       self.xformMeta = xformMeta
     except Exception as ex:
       errmsg = '%s is not valid' % repoMeta['xformMeta']
@@ -316,11 +320,11 @@ class Resolvar(AppResolvar):
       errmsg = 'xform input path does not exist : ' + repoMeta['sysPath']
       self.newMail('ERR1','system error',errmsg)
       raise ResolveError(errmsg)
-
+    
     catPath = self.mPrvdr['category']
     if catPath not in repoMeta['consumer categories']:
-      errmsg = 'consumer category %s does not exist in source repo : %s ' \
-                                          % (catPath, repoMeta['sysPath'])
+      errmsg = 'consumer category %s does not exist in %s' \
+                                % (catPath, str(repoMeta['consumer categories']))
       self.newMail('ERR1','system error',errmsg)
       raise ResolveError(errmsg)
   
@@ -384,7 +388,6 @@ class Resolvar(AppResolvar):
       for nodeName in self.xformMeta.get():
         metaIndex += 1
         csvMeta = self.xformMeta.get(nodeName)
-        #self.db[dbKey] = csvMeta
         dbKey = '%s|XFORM|META|%d' % (self.tsXref, metaIndex)
         self._leveldb.Put(dbKey,json.dumps(csvMeta))
         dbKey = '%s|XFORM|META|%s' % (self.tsXref, nodeName)
@@ -397,155 +400,35 @@ class Resolvar(AppResolvar):
       self.newMail('ERR1',errmsg,str(ex))
       raise ResolveError(errmsg)
 
-	#------------------------------------------------------------------#
-	# getJsDomAsQueue
-	#------------------------------------------------------------------#
-  def getJsDomAsQueue(self):
-    self.method = 'getJsDomAsQueue'
-    try:
-      from collections import deque
-      logger.info("### root name  : " + self.rootName)
-      self.rootMember = Compiler.getRoot(self.rootName)
-      domQueue = deque(self.rootMember.getMembers())
-      while domQueue:
-        nextMember = domQueue.popleft()
-        memberList = nextMember.getMembers()
-        if memberList:
-          domQueue.extendleft(memberList)        
-        yield nextMember
-    except Exception as ex:
-      self.newMail('ERR1','system error',str(ex))
-      raise ResolveError(ex)
-
-  #------------------------------------------------------------------#
-	# compileJson
-	#------------------------------------------------------------------#
-  def compileJson(self):
-    self.method = 'compileJson'    
-    try:
-      jsonDom = list(self.getJsDomAsQueue())
-      for objKey, objValue in self.getRootSet():
-        self.compileJsObject(objKey, objValue, jsonDom)
-      logger.info('### csvToJson compile step is done ...')
-    except (ResolveError, CompileError):
-      raise
-    except Exception as ex:
-      self.newMail('ERR1','compile error',str(ex))
-      raise ResolveError(ex)
-
-  #------------------------------------------------------------------#
-	# getRootSet
-	#------------------------------------------------------------------#
-  def getRootSet(self):
-    self.method = 'getRootSet'
-    try:
-      dbKey = '%s|%s|rowcount' % (self.tsXref, self.rootName)
-      self.rowCount = int(self._leveldb.Get(dbKey))
-      logger.info('### %s row count : %d' % (self.rootName, self.rowCount))
-      keyLow = '%s|%s|%05d' % (self.tsXref,self.rootName,1)
-      keyHigh = '%s|%s|%05d' % (self.tsXref,self.rootName,self.rowCount)
-      dbIter = self._leveldb.RangeIter(key_from=keyLow, key_to=keyHigh)
-      while True:
-        try:
-          key, value = dbIter.next()
-          yield (key, value)
-        except StopIteration:
-          break
-    except Exception as ex:
-      self.newMail('ERR1','system error',str(ex))
-      raise ResolveError(ex)
-
-	#------------------------------------------------------------------#
-  # compileJsObject
-  #
-  # Convert the python object to json text and write to the output file
-  # Return a policy object, adding all the child components to the
-  # policy details object
-	#------------------------------------------------------------------#
-  def compileJsObject(self, dbKey, rootUkey, jsonDom):
-    self.method = 'compileJsObject'
-    logger.debug('### root ukey : ' + rootUkey)
-    try:
-      self.rootMember.compile(dbKey, rootUkey)
-      for nextMember in jsonDom:
-        nextMember.compile()
-      for nextMember in jsonDom:
-        if nextMember.isLeafNode:
-          self.buildJsObject(nextMember)
-      self.rootMember.putJsObject(rootUkey)
-    except CompileError:
-      raise
-    except Exception as ex:
-      self.newMail('ERR1','system error',str(ex))
-      raise ResolveError(ex)
-
-	#------------------------------------------------------------------#
-	# buildJsObject
-  # - child object build depends on parent keys so this means start 
-  # - at the leaf node and traverse back up
-	#------------------------------------------------------------------#
-  def buildJsObject(self, nextMember):
-    self.method = 'buildJsObject'
-    try:
-      while not nextMember.isRoot:
-        nextMember.build()
-        nextMember = nextMember.parent
-    except CompileError:
-      raise
-    except Exception as ex:
-      self.newMail('ERR1','system error',str(ex))
-      raise ResolveError(ex)
+  # -------------------------------------------------------------- #
+  # getHardHashService
+  # ---------------------------------------------------------------#
+  def getHardHashService(self):
+    self.method = 'getHardHashService'
+    params = {"id":None,"setSize":self.jobRange}
+    data = [('job',json.dumps(params))]
+    apiUrl = 'http://localhost:5500/api/v1/hardhash'
+    response = requests.post(apiUrl,data=data)
+    logger.info('api response ' + response.text)
+    rdata = json.loads(response.text) 
+    self.datastoreId = rdata['datastoreId'] 
+    HHProvider.start(self.tsXref, rdata['routerAddr'])
+    logger.info('### HardHash routerAddr : ' + rdata['routerAddr'])
 
   # -------------------------------------------------------------- #
-  # writeJsonFile
+  # putJsonFileMeta
   # ---------------------------------------------------------------#
-  def writeJsonFile(self):
-    self.method = 'writeJsonFile'
+  def putJsonFileMeta(self):
+    self.method = 'putJsonFileMeta'
     try:
-      self.jsonFile = '%s.json' % self.jobId
-      jsonPath = '%s/%s' % (self.workSpace, self.jsonFile)
-      with open(jsonPath,'w') as jsFh:
-        for objValue in self.getRootRangeIter():
-          jsFh.write(objValue + '\n')
-    except ResolveError:
-      raise
-    except Exception as ex:
-      errmsg = 'write failed : ' + self.jsonFile
-      self.newMail('ERR1',errmsg,str(ex))
-      raise ResolveError(ex)
-
-  # -------------------------------------------------------------- #
-  # getRootRangeIter
-  # ---------------------------------------------------------------#
-  def getRootRangeIter(self):
-    self.method = 'getRootRangeIter'
-    try:
-      keyLow = '%s|%05d' % (self.tsXref,1)
-      keyHigh = '%s|%05d' % (self.tsXref,self.rowCount)
-      rowIter = self._leveldb.RangeIter(key_from=keyLow,key_to=keyHigh)
-      while True:
-        try:
-          key, value = rowIter.next()
-          yield value
-        except StopIteration:
-          break
+      dbKey = '%s|TASK|workspace' % self.tsXref
+      self._leveldb.Put(dbKey, self.workSpace)
+      jsonFile = self.jobId + '.json'
+      dbKey = '%s|TASK|OUTPUT|jsonFile' % self.tsXref
+      self._leveldb.Put(dbKey, jsonFile)
     except Exception as ex:
       self.newMail('ERR1','system error',str(ex))
       raise ResolveError(ex)
-
-  # -------------------------------------------------------------- #
-  # compressFile
-  # ---------------------------------------------------------------#
-  def compressFile(self):
-    self.method = 'compressFile'
-    try:
-      logger.info('gzip json file ...')
-      cmdArgs = ['gzip',self.jsonFile]
-      self.sysCmd(cmdArgs,cwd=self.workSpace)
-    except Exception as ex:
-      errmsg = '%s gzip failed' % self.jsonFile
-      self.newMail('ERR1',errmsg,str(ex))
-      raise ResolveError(errmsg)
 
   # -------------------------------------------------------------- #
   # makeZipFile
@@ -563,33 +446,20 @@ class Resolvar(AppResolvar):
       raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
-  # purgeXformData
+  # closeHardHashService
   # ---------------------------------------------------------------#
-  def purgeXformData(self):
-    self.method = 'purgeXformData'
+  def closeHardHashService(self):
+    self.method = 'closeHardHashService'
     try:
-      logger.info('jsonToCsv, purging xform data ...')
-      self._purgeXformData()
+      params = {"id":self.datastoreId}
+      data = [('job',json.dumps(params))]
+      apiUrl = 'http://localhost:5500/api/v1/hardhash'
+      response = requests.delete(apiUrl,data=data)
+      logger.info('api response ' + response.text)
+      logger.info('### HardHash %s is now deleted' % self.datastoreId)
     except Exception as ex:
-      errmsg = 'purge xform data failed'
-      self.newMail('ERR1',errmsg,str(ex))
-      raise ResolveError(errmsg)
-
-  # -------------------------------------------------------------- #
-  # _purgeXformData
-  # ---------------------------------------------------------------#
-  def _purgeXformData(self):
-    self.method = '_purgeXformData'
-    startKey = '%s|0' % self.tsXref
-    endKey = '%s|]' % self.tsXref
-    batch = leveldb.WriteBatch()
-    keyIter = self._leveldb.RangeIter(startKey, endKey, include_value=False)
-    try:
-      while True:
-        key = keyIter.next()
-        batch.Delete(key)
-    except StopIteration:
-      self._leveldb.Write(batch, sync=True)
+      self.newMail('ERR1','HardHash closure failed',str(ex))
+      raise ResolveError(ex)
 
   # -------------------------------------------------------------- #
   # newMail
@@ -626,7 +496,7 @@ class NormaliseLstnr(AppListener):
       if event.exception:
         self.hasError = True
         self.putApiRequest(500)
-      elif self.state.transition == 'NORMALISE_ASYNC':
+      elif self.state.transition in ['COMPOSE_JSON_ASYNC','NORMALISE_ASYNC']:
         self.evalEvent(event.job_id)
 
   # -------------------------------------------------------------- #
@@ -748,9 +618,6 @@ class MetaPrvdr(MetaReader):
       self.jobMeta['client'] = _jobMeta[className]
       logger.info('### CLIENT JOB_META : ' + str(self.jobMeta['client']))        
       self.tsXref = datetime.datetime.now().strftime('%y%m%d%H%M%S')
-      #tsXref = '181223155620'
-      #dbKey = 'TSXREF|' + self.actorId
-      #self._leveldb.Put(dbKey, tsXref)
       logger.info('### jobId, tsXref : %s, %s' % (self.jobId, self.tsXref))
       return (self.jobId, self.tsXref)
     except MetaPrvdrError:
@@ -780,7 +647,10 @@ class MetaPrvdr(MetaReader):
         hostName = self.jobMeta['hostName']
       apiUrl = 'http://%s/api/v1/saas/%s' % (hostName, self.jobMeta[domainKey])
       response = requests.get(apiUrl,data=data)
-      return json.loads(response.text)
+      result = json.loads(response.text)
+      if 'error' in result:
+        raise Exception(result['error'])
+      return result
     except Exception as ex:
       self.newMail('ERR1','system error',str(ex))
       raise MetaPrvdrError(ex)
