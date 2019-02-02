@@ -158,7 +158,7 @@ class NormaliserFactory(object):
         raise Exception(errmsg)
 
       obj = klass()
-      obj.start(tsXref, xformMeta)
+      obj.start(tsXref, xformMeta)      
       obj.normalise(csvFilePath)
     # apscheduler will only catch BaseException, EVENT_JOB_ERROR will not fire otherwise      
     except NormaliseError as ex:
@@ -781,7 +781,7 @@ class JsonComposer(object):
 	#------------------------------------------------------------------#
   def compileJson(self, tsXref):
     self.method = 'compileJson'
-    try:
+    try:      
       self.factory = CompilerFactory(self._leveldb, tsXref)
       self.rootMember = self.factory.get(self.rootName)
       jsonDom = list(self.getJsDomAsQueue())
@@ -863,7 +863,6 @@ class JsonComposer(object):
       rowCount = int(self._hh[dbKey])      
       logger.info('### %s row count : %d' % (self.rootName, rowCount))
 
-      #getKey = lambda rowNum : '%05d' % rowNum
       for rowNum in xrange(1, rowCount+1):
         yield '%05d' % rowNum
 

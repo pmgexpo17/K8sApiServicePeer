@@ -93,15 +93,6 @@ class LeveldbClient(Messenger):
     return client
 
   #----------------------------------------------------------------#
-  # _make
-  #----------------------------------------------------------------#		
-  def _make(self, context, sockType, sockAddr, hwm=100):    
-    self.sock = context.socket(sockType)
-    self.sock.set_hwm(hwm)
-    self.sock.connect(sockAddr)
-    self.active.set()
-
-  #----------------------------------------------------------------#
   # setRestoreMode
   #----------------------------------------------------------------#		
   def setRestoreMode(self, mode):
@@ -144,7 +135,7 @@ class LeveldbClient(Messenger):
   def __getitem__(self, key):
     with self.lock:
       try:
-        key = '%s%s' % (self._prefix, key) if self._prefix else key
+        key = self._prefix + key if self._prefix else key
         self.putPacket(['GET',key])
         return self.getPacket('GET')
       except Exception as ex:
@@ -158,7 +149,7 @@ class LeveldbClient(Messenger):
     with self.lock:    
       try:
         _value = value if isinstance(value, basestring) else json.dumps(value)
-        key = '%s%s' % (self._prefix, key) if self._prefix else key
+        key = self._prefix + key if self._prefix else key
         self.putPacket(['PUT',key,_value])
         self.getPacket('PUT')
       except Exception as ex:
@@ -171,7 +162,7 @@ class LeveldbClient(Messenger):
   def __delitem__(self, key):
     with self.lock:    
       try:
-        key = '%s%s' % (self._prefix, key) if self._prefix else key      
+        key = self._prefix + key if self._prefix else key      
         self.putPacket(['DELETE',key])
         self.getPacket('DELETE')
       except Exception as ex:
@@ -217,7 +208,7 @@ class LeveldbClient(Messenger):
     with self.lock:
       try:
         _value = value if isinstance(value, basestring) else json.dumps(value)
-        key = '%s%s' % (self._prefix, key) if self._prefix else key      
+        key = self._prefix + key if self._prefix else key      
         self.putPacket(['APPEND',key,_value])
         self.getPacket('APPEND')
       except Exception as ex:
@@ -227,9 +218,9 @@ class LeveldbClient(Messenger):
   #----------------------------------------------------------------#
   # select
   # - use with caution - because the related socket is bound to the
-  # - output generator, the socket is unusable until generator is complete
-  # - This means using select requires creating 1 or more extra clients
-  # - to do get/put using selection values.
+  # - output generator, the socket is unusable until the generator is
+  # - complete. This means creating an extra client if selection 
+  # - values are required for immediate get/put actions
   #----------------------------------------------------------------#		
   def select(self, keyLow, keyHigh, keysOnly=False):
     with self.lock:

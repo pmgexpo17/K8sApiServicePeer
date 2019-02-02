@@ -405,7 +405,7 @@ class Resolvar(AppResolvar):
   # ---------------------------------------------------------------#
   def getHardHashService(self):
     self.method = 'getHardHashService'
-    params = {"id":None,"setSize":self.jobRange}
+    params = {'id':None,'setSize':self.jobRange}
     data = [('job',json.dumps(params))]
     apiUrl = 'http://localhost:5500/api/v1/hardhash'
     response = requests.post(apiUrl,data=data)
