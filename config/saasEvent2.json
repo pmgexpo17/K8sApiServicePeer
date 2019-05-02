@@ -1,0 +1,24 @@
+metadoc={
+  "eventDomains" : [
+    "bankAA/loansBB/profitA1",
+    "bankAA/auditAA/finAnlysA1"
+  ],
+  "190101012715": {
+    "client" : "jsonxform.jsonToCsvClient",
+    "service" : "jsonxform.jsonToCsvSaas",
+    "jsonxform.jsonToCsvSaas" : {
+      "hostName" : "172.19.0.2:5000",
+      "repoDomain" : "bankAA/auditAA/finAnlysA1",
+      "category" : "loansBB/profitA1",
+      "xformDomain" : "bankAA/genericAA/genericAA",
+      "workSpace" : "/app/temp",
+      "fileExt":"json"    
+    },
+    "jsonxform.jsonToCsvClient" : {
+      "hostName" : "172.19.0.3:5000",
+      "repoDomain" : "bankAA/loansBB/profitA1",
+      "category" : "auditAA/finAnlysA1",
+      "fileExt":"tar.gz"
+    }
+  }
+}

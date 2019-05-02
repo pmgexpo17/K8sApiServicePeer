@@ -1,0 +1,14 @@
+metadoc={
+  "Members" : [
+    "csvToJson",
+    "jsonToCsv"  
+  ],
+  "csvToJson" : {
+    "repoName" : "/app/volume/volsaas/bankAA/genericAA/assets",
+    "xformMeta" : "csvToJson.json"
+  },
+  "jsonToCsv" : {
+    "repoName" : "/app/volume/volsaas/bankAA/genericAA/assets",
+    "xformMeta" : "jsonToCsv.json"
+  }
+}

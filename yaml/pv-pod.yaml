@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: apipeer1
+  labels:
+    app: apipeer1
+spec:
+  volumes:
+    - name: storage01
+      persistentVolumeClaim:
+       claimName: pvc01
+  containers:
+    - name: apipeer1
+      image: pmg7670/apipeer:v1.0
+      ports:
+        - containerPort: 5000
+          name: "http-server"
+      volumeMounts:
+        - mountPath: "/app/volume"
+          name: storage01
+
